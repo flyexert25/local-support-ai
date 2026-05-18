@@ -1,0 +1,17 @@
+Hello. I understand why this looks confusing, let me explain.
+
+The amount can stay reserved while the operation is being processed, but that does not always mean that the money has been charged twice.
+
+If the merchant has already cancelled the order, the hold is usually released automatically after the payment system finishes processing the reversal.
+
+I would check the current operation status first, and then we can decide whether a dispute or an additional request is needed.
+
+---
+
+I see what happened here.
+
+The payment was processed later than expected, so the status in the app may update with a delay.
+
+This is not always an error. In some cases the bank first receives the authorization, and only after that receives the final cancellation or refund confirmation.
+
+If the amount does not return within the standard timeframe, we can raise a request and check it separately.

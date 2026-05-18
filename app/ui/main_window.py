@@ -305,13 +305,15 @@ class MainWindow(QMainWindow):
         model = self.model_combo.currentText().strip() or self.settings.values.preferred_model
         style = self.style_manager.get_style(self.settings.values.selected_style_id)
         style_prompt = self.style_manager.build_style_prompt(style)
+        style_id = style.id if style else None
+        style_profile = style.profile if style else None
         image_base64 = None if text_only else self.current_clipboard_image_base64
         if self.current_image_path and not text_only:
             image_base64 = image_path_to_base64(self.current_image_path)
 
         self._set_busy(True)
         worker = GenerateWorker(self.ai_manager, customer, ocr, style_prompt, model, image_base64)
-        worker.finished.connect(lambda text: self._generation_finished(text, model, style.id if style else None))
+        worker.finished.connect(lambda text: self._generation_finished(text, model, style_id, style_profile))
         worker.failed.connect(self._worker_failed)
         worker.finished.connect(lambda _: self._forget_worker(worker))
         worker.failed.connect(lambda _: self._forget_worker(worker))
@@ -376,35 +378,46 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
         self._set_status("OCR завершен" if text else "OCR завершен, текст не найден")
 
-    def _generation_finished(self, text: str, model: str, style_id: int | None) -> None:
-        self.response_text.setPlainText(text)
-        analysis = self.case_analyzer.analyze(
-            self.customer_text.toPlainText(),
-            self.ocr_text.toPlainText(),
-            style_profile=style.profile if style else None,
-        )
-        self.database.execute(
-            """
-            INSERT INTO conversations(
-                customer_text, ocr_text, response_text, model_name, style_id,
-                topic, signals_json, extracted_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
+    def _generation_finished(
+        self,
+        text: str,
+        model: str,
+        style_id: int | None,
+        style_profile: dict | None,
+    ) -> None:
+        try:
+            self.response_text.setPlainText(text)
+            analysis = self.case_analyzer.analyze(
                 self.customer_text.toPlainText(),
                 self.ocr_text.toPlainText(),
-                text,
-                model,
-                style_id,
-                analysis.topic,
-                Database.encode_json({"signals": analysis.signals}),
-                Database.encode_json(analysis.extracted),
-            ),
-        )
-        self.case_summary.setText(analysis.to_display_text())
-        self._set_busy(False)
-        self._set_status("Ответ сгенерирован локально")
+                style_profile=style_profile,
+            )
+            self.database.execute(
+                """
+                INSERT INTO conversations(
+                    customer_text, ocr_text, response_text, model_name, style_id,
+                    topic, signals_json, extracted_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self.customer_text.toPlainText(),
+                    self.ocr_text.toPlainText(),
+                    text,
+                    model,
+                    style_id,
+                    analysis.topic,
+                    Database.encode_json({"signals": analysis.signals}),
+                    Database.encode_json(analysis.extracted),
+                ),
+            )
+            self.case_summary.setText(analysis.to_display_text())
+            self._set_status("Ответ сгенерирован локально")
+        except Exception as exc:
+            QMessageBox.warning(self, "Ошибка после генерации", str(exc))
+            self._set_status(f"Ответ получен, но не удалось сохранить аналитику: {exc}")
+        finally:
+            self._set_busy(False)
 
     def _worker_failed(self, message: str) -> None:
         self._set_busy(False)

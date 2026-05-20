@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -28,6 +30,7 @@ from app.storage.analytics_repository import AnalyticsRepository
 from app.storage.database import Database
 from app.styles.style_manager import StyleManager
 from app.ui.widgets import ToggleSwitch
+from app.utils.paths import exports_dir
 
 
 class SettingsDialog(QDialog):
@@ -286,6 +289,10 @@ class SettingsDialog(QDialog):
         if not recent_rows:
             recent_rows = [self._preview_row("История пуста", "Аналитика начнёт собираться после генерации ответов.")]
 
+        export_button = QPushButton("Выгрузить диаграмму")
+        export_button.setObjectName("Primary")
+        export_button.clicked.connect(self._export_analytics_chart)
+        root.addWidget(export_button, 0, Qt.AlignmentFlag.AlignLeft)
         root.addWidget(
             self._section(
                 "Сводка",
@@ -398,6 +405,123 @@ class SettingsDialog(QDialog):
         layout.addWidget(label, 1)
         layout.addWidget(number)
         return row
+
+    def _export_analytics_chart(self) -> None:
+        topics = self.analytics.top_topics(limit=12)
+        if not topics:
+            QMessageBox.information(
+                self,
+                "Нет данных",
+                "Диаграмму можно выгрузить после нескольких сгенерированных ответов.",
+            )
+            return
+
+        default_name = f"analytics_topics_{datetime.now():%Y-%m-%d_%H-%M}.png"
+        default_path = exports_dir() / default_name
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Выгрузить диаграмму",
+            str(default_path),
+            "PNG image (*.png)",
+        )
+        if not filename:
+            return
+
+        path = Path(filename)
+        if path.suffix.lower() != ".png":
+            path = path.with_suffix(".png")
+
+        try:
+            self._render_topics_chart(path, topics)
+            QMessageBox.information(self, "Готово", f"Диаграмма сохранена:\n{path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Экспорт не удался", str(exc))
+
+    def _render_topics_chart(self, path: Path, topics: list[tuple[str, int]]) -> None:
+        width = 1200
+        row_height = 58
+        top_padding = 150
+        left_padding = 310
+        right_padding = 90
+        bottom_padding = 80
+        height = max(520, top_padding + bottom_padding + row_height * len(topics))
+
+        is_light = self.settings.values.theme == "light"
+        background = QColor("#f4f7fb" if is_light else "#0f131a")
+        card = QColor("#ffffff" if is_light else "#171d26")
+        text = QColor("#0f172a" if is_light else "#f4f7fb")
+        muted = QColor("#64748b" if is_light else "#9aa7bd")
+        grid = QColor("#d7dfeb" if is_light else "#283241")
+        bar = QColor("#2f7cf6")
+        bar_shadow = QColor("#8bb8ff" if is_light else "#164b9c")
+
+        pixmap = QPixmap(width, height)
+        pixmap.fill(background)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(card)
+            painter.drawRoundedRect(32, 28, width - 64, height - 56, 18, 18)
+
+            painter.setPen(text)
+            title_font = QFont("Segoe UI", 26, QFont.Weight.Bold)
+            painter.setFont(title_font)
+            painter.drawText(72, 86, "Аналитика обращений")
+
+            painter.setPen(muted)
+            subtitle_font = QFont("Segoe UI", 13)
+            painter.setFont(subtitle_font)
+            generated_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+            painter.drawText(72, 118, f"Количество по темам · выгружено {generated_at}")
+
+            max_count = max(count for _, count in topics) or 1
+            chart_left = left_padding
+            chart_top = top_padding
+            chart_width = width - left_padding - right_padding
+            max_bar_width = chart_width - 90
+
+            painter.setPen(grid)
+            painter.drawLine(chart_left, chart_top - 18, chart_left + max_bar_width, chart_top - 18)
+
+            label_font = QFont("Segoe UI", 13, QFont.Weight.DemiBold)
+            value_font = QFont("Segoe UI", 14, QFont.Weight.Bold)
+            small_font = QFont("Segoe UI", 11)
+
+            for index, (topic, count) in enumerate(topics):
+                y = chart_top + index * row_height
+                bar_width = max(10, int(max_bar_width * (count / max_count)))
+
+                painter.setFont(label_font)
+                painter.setPen(text)
+                label = painter.fontMetrics().elidedText(topic, Qt.TextElideMode.ElideRight, left_padding - 110)
+                painter.drawText(72, y + 28, label)
+
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(bar_shadow)
+                painter.drawRoundedRect(chart_left, y + 7, max_bar_width, 22, 11, 11)
+                painter.setBrush(bar)
+                painter.drawRoundedRect(chart_left, y + 7, bar_width, 22, 11, 11)
+
+                painter.setFont(value_font)
+                painter.setPen(text)
+                painter.drawText(chart_left + max_bar_width + 18, y + 27, str(count))
+
+                painter.setFont(small_font)
+                painter.setPen(muted)
+                percent = round(count / sum(value for _, value in topics) * 100)
+                painter.drawText(chart_left + max_bar_width + 18, y + 45, f"{percent}%")
+
+            painter.setPen(muted)
+            painter.setFont(small_font)
+            painter.drawText(72, height - 56, "Local Support AI · локальный отчёт из SQLite")
+        finally:
+            painter.end()
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not pixmap.save(str(path), "PNG"):
+            raise RuntimeError("Не удалось сохранить PNG-файл.")
 
     def _load_styles(self) -> None:
         self.styles_list.clear()

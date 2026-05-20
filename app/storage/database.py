@@ -50,6 +50,7 @@ class Database:
                     topic TEXT NOT NULL DEFAULT '',
                     signals_json TEXT NOT NULL DEFAULT '{}',
                     extracted_json TEXT NOT NULL DEFAULT '{}',
+                    generation_ms INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
@@ -57,6 +58,7 @@ class Database:
             self._ensure_column(db, "conversations", "topic", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(db, "conversations", "signals_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(db, "conversations", "extracted_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(db, "conversations", "generation_ms", "INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:

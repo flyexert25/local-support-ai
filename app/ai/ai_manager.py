@@ -85,6 +85,11 @@ class AIManager:
                 "num_predict": self.settings.values.max_tokens,
             },
         }
+        device = getattr(self.settings.values, "generation_device", "auto")
+        if device == "cpu":
+            payload["options"]["num_gpu"] = 0
+        elif device == "gpu":
+            payload["options"]["num_gpu"] = 999
         if image_base64:
             payload["images"] = [image_base64]
         response = self.session.post(f"{self.base_url}/api/generate", json=payload, timeout=180)

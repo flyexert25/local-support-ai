@@ -21,6 +21,7 @@ class AppSettings:
     always_on_top: bool = False
     compact_mode: bool = False
     network_disabled: bool = False
+    generation_device: str = "auto"
     temperature: float = 0.35
     max_tokens: int = 900
 

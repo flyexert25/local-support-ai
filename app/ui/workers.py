@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from time import perf_counter
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
@@ -25,7 +26,7 @@ class OCRWorker(QObject):
 
 
 class GenerateWorker(QObject):
-    finished = pyqtSignal(str)
+    finished = pyqtSignal(str, float)
     failed = pyqtSignal(str)
 
     def __init__(
@@ -47,15 +48,16 @@ class GenerateWorker(QObject):
 
     def run(self) -> None:
         try:
-            self.finished.emit(
-                self.ai_manager.generate_reply(
-                    customer_text=self.customer_text,
-                    ocr_text=self.ocr_text,
-                    style_prompt=self.style_prompt,
-                    model=self.model,
-                    image_base64=self.image_base64,
-                )
+            started_at = perf_counter()
+            reply = self.ai_manager.generate_reply(
+                customer_text=self.customer_text,
+                ocr_text=self.ocr_text,
+                style_prompt=self.style_prompt,
+                model=self.model,
+                image_base64=self.image_base64,
             )
+            elapsed_ms = (perf_counter() - started_at) * 1000
+            self.finished.emit(reply, elapsed_ms)
         except Exception as exc:
             self.failed.emit(str(exc))
 

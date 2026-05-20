@@ -11,6 +11,21 @@ class AnalyticsRepository:
         row = self.database.fetch_one("SELECT COUNT(*) AS count FROM conversations")
         return int(row["count"]) if row else 0
 
+    def average_generation_ms(self) -> int:
+        row = self.database.fetch_one(
+            """
+            SELECT AVG(NULLIF(generation_ms, 0)) AS value
+            FROM conversations
+            """
+        )
+        value = row["value"] if row else None
+        return int(value or 0)
+
+    def slowest_generation_ms(self) -> int:
+        row = self.database.fetch_one("SELECT MAX(generation_ms) AS value FROM conversations")
+        value = row["value"] if row else None
+        return int(value or 0)
+
     def top_topics(self, limit: int = 8) -> list[tuple[str, int]]:
         rows = self.database.fetch_all(
             """

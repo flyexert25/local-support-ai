@@ -313,9 +313,9 @@ class MainWindow(QMainWindow):
 
         self._set_busy(True)
         worker = GenerateWorker(self.ai_manager, customer, ocr, style_prompt, model, image_base64)
-        worker.finished.connect(lambda text: self._generation_finished(text, model, style_id, style_profile))
+        worker.finished.connect(lambda text, elapsed_ms: self._generation_finished(text, model, style_id, style_profile, elapsed_ms))
         worker.failed.connect(self._worker_failed)
-        worker.finished.connect(lambda _: self._forget_worker(worker))
+        worker.finished.connect(lambda *_: self._forget_worker(worker))
         worker.failed.connect(lambda _: self._forget_worker(worker))
         self.workers.append(worker)
         self.threads.append(start_worker(worker))
@@ -384,6 +384,7 @@ class MainWindow(QMainWindow):
         model: str,
         style_id: int | None,
         style_profile: dict | None,
+        elapsed_ms: float,
     ) -> None:
         try:
             self.response_text.setPlainText(text)
@@ -396,9 +397,9 @@ class MainWindow(QMainWindow):
                 """
                 INSERT INTO conversations(
                     customer_text, ocr_text, response_text, model_name, style_id,
-                    topic, signals_json, extracted_json
+                    topic, signals_json, extracted_json, generation_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self.customer_text.toPlainText(),
@@ -409,10 +410,11 @@ class MainWindow(QMainWindow):
                     analysis.topic,
                     Database.encode_json({"signals": analysis.signals}),
                     Database.encode_json(analysis.extracted),
+                    int(elapsed_ms),
                 ),
             )
             self.case_summary.setText(analysis.to_display_text())
-            self._set_status("Ответ сгенерирован локально")
+            self._set_status(f"Ответ сгенерирован локально · SLA {self._format_duration(elapsed_ms)}")
         except Exception as exc:
             QMessageBox.warning(self, "Ошибка после генерации", str(exc))
             self._set_status(f"Ответ получен, но не удалось сохранить аналитику: {exc}")
@@ -455,6 +457,15 @@ class MainWindow(QMainWindow):
         animation.setEndValue(38)
         animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    @staticmethod
+    def _format_duration(milliseconds: float) -> str:
+        seconds = milliseconds / 1000
+        if seconds < 60:
+            return f"{seconds:.1f} сек"
+        minutes = int(seconds // 60)
+        rest = int(seconds % 60)
+        return f"{minutes} мин {rest} сек"
 
     def _settings_changed(self) -> None:
         set_allow_localhost(not self.settings.values.network_disabled)

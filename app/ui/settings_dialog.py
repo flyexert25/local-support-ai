@@ -83,6 +83,12 @@ class SettingsDialog(QDialog):
 
         self.ollama_url = QLineEdit(self.settings.values.ollama_url)
         self.preferred_model = QLineEdit(self.settings.values.preferred_model)
+        self.generation_device = QComboBox()
+        self.generation_device.addItem("Авто (рекомендуется)", "auto")
+        self.generation_device.addItem("CPU", "cpu")
+        self.generation_device.addItem("GPU", "gpu")
+        device_index = self.generation_device.findData(getattr(self.settings.values, "generation_device", "auto"))
+        self.generation_device.setCurrentIndex(max(device_index, 0))
         self.mode_text_only = QRadioButton("Только текст")
         self.mode_vision_auto = QRadioButton("Текст + локальная vision-модель")
         mode = self.settings.values.processing_mode
@@ -112,6 +118,11 @@ class SettingsDialog(QDialog):
                 [
                     self._field_row("Адрес Ollama", "Обычно http://localhost:11434", self.ollama_url),
                     self._field_row("Модель по умолчанию", "Например qwen2.5vl:latest", self.preferred_model),
+                    self._field_row(
+                        "Устройство генерации",
+                        "Авто обычно лучше: Ollama сама использует GPU, если он доступен. CPU полезен для стабильности или тестов.",
+                        self.generation_device,
+                    ),
                 ],
             )
         )
@@ -260,6 +271,8 @@ class SettingsDialog(QDialog):
         root.setSpacing(14)
 
         total = self.analytics.total_generated()
+        average_generation_ms = self.analytics.average_generation_ms()
+        slowest_generation_ms = self.analytics.slowest_generation_ms()
         topic_rows = [
             self._metric_row(topic, f"{count} ответ(ов)")
             for topic, count in self.analytics.top_topics()
@@ -299,6 +312,8 @@ class SettingsDialog(QDialog):
                 "Локальная статистика по ответам, сохранённая в SQLite.",
                 [
                     self._metric_row("Сгенерировано ответов", str(total)),
+                    self._metric_row("Среднее SLA генерации", self._format_duration(average_generation_ms)),
+                    self._metric_row("Самая долгая генерация", self._format_duration(slowest_generation_ms)),
                 ],
             )
         )
@@ -405,6 +420,17 @@ class SettingsDialog(QDialog):
         layout.addWidget(label, 1)
         layout.addWidget(number)
         return row
+
+    @staticmethod
+    def _format_duration(milliseconds: int | float) -> str:
+        if not milliseconds:
+            return "нет данных"
+        seconds = float(milliseconds) / 1000
+        if seconds < 60:
+            return f"{seconds:.1f} сек"
+        minutes = int(seconds // 60)
+        rest = int(seconds % 60)
+        return f"{minutes} мин {rest} сек"
 
     def _export_analytics_chart(self) -> None:
         topics = self.analytics.top_topics(limit=12)
@@ -609,6 +635,7 @@ class SettingsDialog(QDialog):
         self.settings.update(
             ollama_url=self.ollama_url.text().strip() or "http://localhost:11434",
             preferred_model=self.preferred_model.text().strip(),
+            generation_device=self.generation_device.currentData() or "auto",
             processing_mode="text_only" if self.mode_text_only.isChecked() else "vision_auto",
             theme="light" if self.light_theme.isChecked() else "dark",
             use_ocr=self.use_ocr.isChecked(),

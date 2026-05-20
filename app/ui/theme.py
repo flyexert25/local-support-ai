@@ -78,6 +78,15 @@ QPushButton#Danger {
     background: #392129;
     border-color: #61313F;
 }
+QPushButton#Ghost {
+    background: #1B2230;
+    color: #D9E2F2;
+    border: 1px solid #344055;
+    padding: 6px 10px;
+}
+QPushButton#Ghost:hover {
+    background: #232C3B;
+}
 QToolButton {
     background: #242B36;
     color: #F4F7FA;
@@ -197,6 +206,15 @@ QPushButton#Danger {
     background: #FFF0F2;
     color: #9D2336;
     border-color: #F1C2CA;
+}
+QPushButton#Ghost {
+    background: #F7F9FC;
+    color: #2B3A52;
+    border: 1px solid #D8E0ED;
+    padding: 6px 10px;
+}
+QPushButton#Ghost:hover {
+    background: #EDF2F8;
 }
 QToolButton {
     background: #EEF2F7;

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPixmap
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPixmap
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -25,22 +28,35 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.ai.ai_manager import AIManager
 from app.core.settings_manager import SettingsManager
+from app.ocr.ocr_manager import OCRManager
 from app.storage.analytics_repository import AnalyticsRepository
 from app.storage.database import Database
 from app.styles.style_manager import StyleManager
 from app.ui.widgets import ToggleSwitch
-from app.utils.paths import exports_dir
+from app.utils.paths import exports_dir, logs_dir
 
 
 class SettingsDialog(QDialog):
     settingsChanged = pyqtSignal()
 
-    def __init__(self, settings: SettingsManager, style_manager: StyleManager, database: Database, parent=None) -> None:
+    def __init__(
+        self,
+        settings: SettingsManager,
+        style_manager: StyleManager,
+        database: Database,
+        ai_manager: AIManager,
+        ocr_manager: OCRManager,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.settings = settings
         self.style_manager = style_manager
         self.analytics = AnalyticsRepository(database)
+        self.database = database
+        self.ai_manager = ai_manager
+        self.ocr_manager = ocr_manager
         self.current_style_id: int | None = settings.values.selected_style_id
         self.setWindowTitle("Настройки")
         self.resize(920, 680)
@@ -50,6 +66,7 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(self._scrollable(self._build_appearance_tab()), "Внешний вид")
         self.tabs.addTab(self._build_styles_tab(), "Мой стиль общения")
         self.tabs.addTab(self._scrollable(self._build_analytics_tab()), "Аналитика")
+        self.tabs.addTab(self._scrollable(self._build_diagnostics_tab()), "Диагностика")
 
         save_button = QPushButton("Сохранить")
         save_button.setObjectName("Primary")
@@ -91,6 +108,10 @@ class SettingsDialog(QDialog):
         self.generation_device.setCurrentIndex(max(device_index, 0))
         self.mode_text_only = QRadioButton("Только текст")
         self.mode_vision_auto = QRadioButton("Текст + локальная vision-модель")
+        self.processing_mode_group = QButtonGroup(self)
+        self.processing_mode_group.setExclusive(True)
+        self.processing_mode_group.addButton(self.mode_text_only)
+        self.processing_mode_group.addButton(self.mode_vision_auto)
         mode = self.settings.values.processing_mode
         self.mode_text_only.setChecked(mode == "text_only")
         self.mode_vision_auto.setChecked(mode != "text_only")
@@ -334,6 +355,41 @@ class SettingsDialog(QDialog):
         root.addStretch(1)
         return page
 
+    def _build_diagnostics_tab(self) -> QWidget:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(14)
+
+        refresh_button = QPushButton("Обновить диагностику")
+        refresh_button.setObjectName("Primary")
+        refresh_button.clicked.connect(self._refresh_diagnostics)
+        root.addWidget(refresh_button, 0, Qt.AlignmentFlag.AlignLeft)
+
+        self.diagnostics_runtime_section = self._section(
+            "Состояние системы",
+            "Проверка локальной модели, OCR и активного режима работы приложения.",
+            [],
+        )
+        self.diagnostics_storage_section = self._section(
+            "Локальные пути",
+            "Где приложение хранит базу, настройки, логи и экспортированные отчёты.",
+            [],
+        )
+        self.diagnostics_performance_section = self._section(
+            "Быстрая сводка",
+            "Короткие показатели по генерации и текущей конфигурации.",
+            [],
+        )
+
+        root.addWidget(self.diagnostics_runtime_section)
+        root.addWidget(self.diagnostics_storage_section)
+        root.addWidget(self.diagnostics_performance_section)
+        root.addStretch(1)
+
+        self._refresh_diagnostics()
+        return page
+
     def _section(self, title: str, subtitle: str, rows: list[QWidget]) -> QFrame:
         frame = QFrame()
         frame.setObjectName("Panel")
@@ -350,6 +406,65 @@ class SettingsDialog(QDialog):
         for row in rows:
             layout.addWidget(row)
         return frame
+
+    def _replace_section_rows(self, frame: QFrame, rows: list[QWidget]) -> None:
+        layout = frame.layout()
+        if layout is None:
+            return
+        while layout.count() > 2:
+            item = layout.takeAt(2)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for row in rows:
+            layout.addWidget(row)
+
+    def _refresh_diagnostics(self) -> None:
+        ollama_status = self.ai_manager.check_status()
+        ocr_status = self.ocr_manager.status()
+        average_generation_ms = self.analytics.average_generation_ms()
+        slowest_generation_ms = self.analytics.slowest_generation_ms()
+
+        active_mode = "Только текст" if self.settings.values.processing_mode == "text_only" else "Текст + vision"
+        device_map = {
+            "auto": "Авто",
+            "cpu": "CPU",
+            "gpu": "GPU",
+        }
+        model_label = self.settings.values.preferred_model or "не выбрана"
+        supported_models = ", ".join(ollama_status.supported_models[:4]) if ollama_status.supported_models else "не найдены"
+
+        runtime_rows = [
+            self._metric_row("Ollama", "доступен" if ollama_status.connected else "недоступен"),
+            self._preview_row("Сообщение Ollama", ollama_status.message),
+            self._metric_row("Vision-модели", supported_models),
+            self._metric_row("Модель по умолчанию", model_label),
+            self._metric_row("OCR", "готов" if ocr_status.ready else "не готов"),
+            self._preview_row("Сообщение OCR", ocr_status.message),
+            self._metric_row("Режим обработки", active_mode),
+            self._metric_row("Устройство генерации", device_map.get(self.settings.values.generation_device, "Авто")),
+            self._metric_row("Сеть", "полностью заблокирована" if self.settings.values.network_disabled else "разрешён только localhost"),
+        ]
+
+        storage_rows = [
+            self._path_row("База SQLite", self.database.path),
+            self._path_row("Файл настроек", self.settings.settings_path),
+            self._path_row("Папка логов", logs_dir()),
+            self._path_row("Папка экспорта", exports_dir()),
+            self._path_row("Папка данных приложения", self.settings.data_dir),
+        ]
+
+        performance_rows = [
+            self._metric_row("Сгенерировано ответов", str(self.analytics.total_generated())),
+            self._metric_row("Среднее SLA", self._format_duration(average_generation_ms)),
+            self._metric_row("Самое долгое SLA", self._format_duration(slowest_generation_ms)),
+            self._metric_row("OCR-движок", self.settings.values.ocr_engine),
+            self._metric_row("Языки OCR", ", ".join(self.settings.values.ocr_languages)),
+        ]
+
+        self._replace_section_rows(self.diagnostics_runtime_section, runtime_rows)
+        self._replace_section_rows(self.diagnostics_storage_section, storage_rows)
+        self._replace_section_rows(self.diagnostics_performance_section, performance_rows)
 
     def _toggle_row(self, title: str, subtitle: str, toggle: ToggleSwitch) -> QWidget:
         row = QWidget()
@@ -407,6 +522,44 @@ class SettingsDialog(QDialog):
         layout.addWidget(label)
         layout.addWidget(hint)
         return row
+
+    def _path_row(self, title: str, path: Path) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(10)
+
+        text_box = QVBoxLayout()
+        label = QLabel(title)
+        label.setStyleSheet("font-weight: 600;")
+        hint = QLabel(str(path))
+        hint.setObjectName("Subtle")
+        hint.setWordWrap(True)
+        text_box.addWidget(label)
+        text_box.addWidget(hint)
+
+        button = QPushButton("Перейти")
+        button.setObjectName("Ghost")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFixedWidth(88)
+        button.clicked.connect(lambda: self._open_path(path))
+
+        layout.addLayout(text_box, 1)
+        layout.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
+        return row
+
+    def _open_path(self, path: Path) -> None:
+        try:
+            target = path if path.exists() else path.parent
+            if os.name == "nt":
+                if path.exists() and path.is_file():
+                    subprocess.run(["explorer", "/select,", str(path)], check=False)
+                else:
+                    os.startfile(str(target))
+                return
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+        except Exception as exc:
+            QMessageBox.warning(self, "Не удалось открыть путь", str(exc))
 
     def _metric_row(self, title: str, value: str) -> QWidget:
         row = QWidget()

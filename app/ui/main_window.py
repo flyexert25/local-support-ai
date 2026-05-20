@@ -351,7 +351,14 @@ class MainWindow(QMainWindow):
         self._set_status("Очищено")
 
     def open_settings(self) -> None:
-        dialog = SettingsDialog(self.settings, self.style_manager, self.database, self)
+        dialog = SettingsDialog(
+            self.settings,
+            self.style_manager,
+            self.database,
+            self.ai_manager,
+            self.ocr_manager,
+            self,
+        )
         dialog.settingsChanged.connect(self._settings_changed)
         dialog.exec()
 

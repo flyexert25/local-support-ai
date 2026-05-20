@@ -55,6 +55,34 @@ class Database:
                 )
                 """
             )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ocr_feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    image_path TEXT NOT NULL DEFAULT '',
+                    raw_text TEXT NOT NULL DEFAULT '',
+                    corrected_text TEXT NOT NULL DEFAULT '',
+                    engine TEXT NOT NULL DEFAULT '',
+                    verdict TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS response_feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    customer_text TEXT NOT NULL DEFAULT '',
+                    ocr_text TEXT NOT NULL DEFAULT '',
+                    raw_response TEXT NOT NULL DEFAULT '',
+                    corrected_response TEXT NOT NULL DEFAULT '',
+                    model_name TEXT NOT NULL DEFAULT '',
+                    style_id INTEGER,
+                    verdict TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             self._ensure_column(db, "conversations", "topic", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(db, "conversations", "signals_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(db, "conversations", "extracted_json", "TEXT NOT NULL DEFAULT '{}'")

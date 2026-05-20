@@ -35,6 +35,7 @@ class GenerateWorker(QObject):
         customer_text: str,
         ocr_text: str,
         style_prompt: str,
+        quality_rules: str,
         model: str,
         image_base64: str | None,
     ) -> None:
@@ -43,6 +44,7 @@ class GenerateWorker(QObject):
         self.customer_text = customer_text
         self.ocr_text = ocr_text
         self.style_prompt = style_prompt
+        self.quality_rules = quality_rules
         self.model = model
         self.image_base64 = image_base64
 
@@ -53,6 +55,7 @@ class GenerateWorker(QObject):
                 customer_text=self.customer_text,
                 ocr_text=self.ocr_text,
                 style_prompt=self.style_prompt,
+                quality_rules=self.quality_rules,
                 model=self.model,
                 image_base64=self.image_base64,
             )

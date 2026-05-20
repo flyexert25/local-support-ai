@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 
 from app.ai.ai_manager import AIManager
 from app.core.case_analyzer import CaseAnalyzer
+from app.core.learning_manager import LearningManager
 from app.core.privacy_guard import set_allow_localhost
 from app.core.settings_manager import SettingsManager
 from app.ocr.ocr_manager import OCRManager
@@ -51,8 +52,13 @@ class MainWindow(QMainWindow):
         self.ai_manager = ai_manager
         self.ocr_manager = ocr_manager
         self.case_analyzer = CaseAnalyzer()
+        self.learning_manager = LearningManager(database)
         self.current_image_path: Path | None = None
         self.current_clipboard_image_base64: str | None = None
+        self.last_ocr_raw_text: str = ""
+        self.last_generated_raw_response: str = ""
+        self.last_generated_model: str = ""
+        self.last_generated_style_id: int | None = None
         self.threads = []
         self.workers = []
 
@@ -166,11 +172,43 @@ class MainWindow(QMainWindow):
         self.ocr_text = QPlainTextEdit()
         self.ocr_text.setPlaceholderText("Здесь появится распознанный текст со скриншота. Можно редактировать вручную.")
         self.ocr_text.textChanged.connect(self.update_case_summary)
-        layout.addWidget(self._wrap_panel("Распознанный текст", self.ocr_text), 1)
+        self.ocr_feedback_correct_button = QPushButton("OCR верно")
+        self.ocr_feedback_correct_button.setObjectName("Ghost")
+        self.ocr_feedback_correct_button.clicked.connect(self.mark_ocr_correct)
+        self.ocr_feedback_save_button = QPushButton("Сохранить исправленный текст")
+        self.ocr_feedback_save_button.clicked.connect(self.save_corrected_ocr_text)
+        ocr_actions = QHBoxLayout()
+        ocr_actions.addStretch(1)
+        ocr_actions.addWidget(self.ocr_feedback_correct_button)
+        ocr_actions.addWidget(self.ocr_feedback_save_button)
+        ocr_panel_body = QWidget()
+        ocr_panel_layout = QVBoxLayout(ocr_panel_body)
+        ocr_panel_layout.setContentsMargins(0, 0, 0, 0)
+        ocr_panel_layout.setSpacing(10)
+        ocr_panel_layout.addWidget(self.ocr_text, 1)
+        ocr_panel_layout.addLayout(ocr_actions)
+        layout.addWidget(self._wrap_panel("Распознанный текст", ocr_panel_body), 1)
+        self._set_ocr_feedback_enabled(False)
 
         self.response_text = QPlainTextEdit()
         self.response_text.setPlaceholderText("Готовый ответ появится здесь.")
-        layout.addWidget(self._wrap_panel("Сгенерированный ответ", self.response_text), 1)
+        self.response_feedback_correct_button = QPushButton("Ответ верный")
+        self.response_feedback_correct_button.setObjectName("Ghost")
+        self.response_feedback_correct_button.clicked.connect(self.mark_response_correct)
+        self.response_feedback_save_button = QPushButton("Сохранить исправленный ответ")
+        self.response_feedback_save_button.clicked.connect(self.save_corrected_response)
+        response_actions = QHBoxLayout()
+        response_actions.addStretch(1)
+        response_actions.addWidget(self.response_feedback_correct_button)
+        response_actions.addWidget(self.response_feedback_save_button)
+        response_panel_body = QWidget()
+        response_panel_layout = QVBoxLayout(response_panel_body)
+        response_panel_layout.setContentsMargins(0, 0, 0, 0)
+        response_panel_layout.setSpacing(10)
+        response_panel_layout.addWidget(self.response_text, 1)
+        response_panel_layout.addLayout(response_actions)
+        layout.addWidget(self._wrap_panel("Сгенерированный ответ", response_panel_body), 1)
+        self._set_response_feedback_enabled(False)
 
         buttons = QHBoxLayout()
         self.generate_button = QPushButton("Сгенерировать ответ")
@@ -270,6 +308,12 @@ class MainWindow(QMainWindow):
             return
         self.current_image_path = path
         self.current_clipboard_image_base64 = None
+        self.last_ocr_raw_text = ""
+        self.last_generated_raw_response = ""
+        self.last_generated_model = ""
+        self.last_generated_style_id = None
+        self._set_ocr_feedback_enabled(False)
+        self._set_response_feedback_enabled(False)
         self.drop_zone.set_pixmap(pixmap)
         self._set_status(f"Скриншот загружен: {path.name}")
 
@@ -305,6 +349,7 @@ class MainWindow(QMainWindow):
         model = self.model_combo.currentText().strip() or self.settings.values.preferred_model
         style = self.style_manager.get_style(self.settings.values.selected_style_id)
         style_prompt = self.style_manager.build_style_prompt(style)
+        quality_rules = self.learning_manager.build_quality_rules(style.profile if style else None)
         style_id = style.id if style else None
         style_profile = style.profile if style else None
         image_base64 = None if text_only else self.current_clipboard_image_base64
@@ -312,7 +357,7 @@ class MainWindow(QMainWindow):
             image_base64 = image_path_to_base64(self.current_image_path)
 
         self._set_busy(True)
-        worker = GenerateWorker(self.ai_manager, customer, ocr, style_prompt, model, image_base64)
+        worker = GenerateWorker(self.ai_manager, customer, ocr, style_prompt, quality_rules, model, image_base64)
         worker.finished.connect(lambda text, elapsed_ms: self._generation_finished(text, model, style_id, style_profile, elapsed_ms))
         worker.failed.connect(self._worker_failed)
         worker.finished.connect(lambda *_: self._forget_worker(worker))
@@ -347,6 +392,12 @@ class MainWindow(QMainWindow):
         self.response_text.clear()
         self.current_image_path = None
         self.current_clipboard_image_base64 = None
+        self.last_ocr_raw_text = ""
+        self.last_generated_raw_response = ""
+        self.last_generated_model = ""
+        self.last_generated_style_id = None
+        self._set_ocr_feedback_enabled(False)
+        self._set_response_feedback_enabled(False)
         self.drop_zone.set_pixmap(None)
         self._set_status("Очищено")
 
@@ -375,15 +426,30 @@ class MainWindow(QMainWindow):
                 temp_path = self.settings.data_dir / "clipboard_image.png"
                 temp_path.write_bytes(qimage_to_png_bytes(image))
                 self.current_image_path = temp_path
+                self.last_ocr_raw_text = ""
+                self.last_generated_raw_response = ""
+                self.last_generated_model = ""
+                self.last_generated_style_id = None
+                self._set_ocr_feedback_enabled(False)
+                self._set_response_feedback_enabled(False)
                 self.drop_zone.set_pixmap(load_pixmap(temp_path))
                 self._set_status("Скриншот вставлен из буфера обмена")
                 return
         super().keyPressEvent(event)
 
     def _ocr_finished(self, text: str) -> None:
-        self.ocr_text.setPlainText(text or "")
+        self.last_ocr_raw_text = text or ""
+        learned = self.learning_manager.apply_ocr_memory(text or "")
+        self.ocr_text.setPlainText(learned.text)
+        self._set_ocr_feedback_enabled(bool(text))
         self._set_busy(False)
-        self._set_status("OCR завершен" if text else "OCR завершен, текст не найден")
+        if not text:
+            self._set_status("OCR завершен, текст не найден")
+        elif learned.replacements:
+            preview = ", ".join(f"{source} -> {target}" for source, target in learned.replacements[:3])
+            self._set_status(f"OCR завершен · автокоррекция: {preview}")
+        else:
+            self._set_status("OCR завершен")
 
     def _generation_finished(
         self,
@@ -395,6 +461,10 @@ class MainWindow(QMainWindow):
     ) -> None:
         try:
             self.response_text.setPlainText(text)
+            self.last_generated_raw_response = text
+            self.last_generated_model = model
+            self.last_generated_style_id = style_id
+            self._set_response_feedback_enabled(bool(text.strip()))
             analysis = self.case_analyzer.analyze(
                 self.customer_text.toPlainText(),
                 self.ocr_text.toPlainText(),
@@ -442,6 +512,98 @@ class MainWindow(QMainWindow):
             and self.settings.values.processing_mode != "text_only"
         )
         self.refresh_button.setEnabled(not busy)
+
+        has_ocr_feedback = bool(self.last_ocr_raw_text)
+        has_response_feedback = bool(self.last_generated_raw_response)
+        self.ocr_feedback_correct_button.setEnabled(not busy and has_ocr_feedback)
+        self.ocr_feedback_save_button.setEnabled(not busy and has_ocr_feedback)
+        self.response_feedback_correct_button.setEnabled(not busy and has_response_feedback)
+        self.response_feedback_save_button.setEnabled(not busy and has_response_feedback)
+
+    def _set_ocr_feedback_enabled(self, enabled: bool) -> None:
+        self.ocr_feedback_correct_button.setEnabled(enabled)
+        self.ocr_feedback_save_button.setEnabled(enabled)
+
+    def _set_response_feedback_enabled(self, enabled: bool) -> None:
+        self.response_feedback_correct_button.setEnabled(enabled)
+        self.response_feedback_save_button.setEnabled(enabled)
+
+    def mark_ocr_correct(self) -> None:
+        text = self.ocr_text.toPlainText().strip()
+        if not text:
+            QMessageBox.information(self, "Нет OCR-текста", "Сначала распознайте текст со скриншота.")
+            return
+        self._save_ocr_feedback("correct", text)
+        self._set_status("OCR отмечен как корректный")
+
+    def save_corrected_ocr_text(self) -> None:
+        corrected_text = self.ocr_text.toPlainText().strip()
+        if not corrected_text:
+            QMessageBox.information(self, "Нет текста", "Исправьте OCR-текст или сначала выполните распознавание.")
+            return
+        if not self.last_ocr_raw_text:
+            QMessageBox.information(self, "Нет исходного OCR", "Сначала выполните OCR, а потом сохраните исправленный текст.")
+            return
+        self._save_ocr_feedback("corrected", corrected_text)
+        self._set_status("Исправленный OCR-текст сохранён")
+
+    def _save_ocr_feedback(self, verdict: str, corrected_text: str) -> None:
+        self.database.execute(
+            """
+            INSERT INTO ocr_feedback(image_path, raw_text, corrected_text, engine, verdict)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                str(self.current_image_path or ""),
+                self.last_ocr_raw_text,
+                corrected_text,
+                self.settings.values.ocr_engine,
+                verdict,
+            ),
+        )
+
+    def mark_response_correct(self) -> None:
+        text = self.response_text.toPlainText().strip()
+        if not text or not self.last_generated_raw_response:
+            QMessageBox.information(self, "Нет ответа", "Сначала сгенерируйте ответ.")
+            return
+        self._save_response_feedback("correct", text)
+        self._set_status("Ответ отмечен как удачный")
+
+    def save_corrected_response(self) -> None:
+        corrected_text = self.response_text.toPlainText().strip()
+        if not corrected_text or not self.last_generated_raw_response:
+            QMessageBox.information(self, "Нет исходного ответа", "Сначала сгенерируйте ответ, затем при необходимости исправьте его.")
+            return
+        self._save_response_feedback("corrected", corrected_text)
+        if self.last_generated_style_id:
+            try:
+                self.style_manager.append_example(self.last_generated_style_id, corrected_text)
+                self._set_status("Исправленный ответ сохранён и добавлен в стиль")
+                return
+            except Exception:
+                pass
+        self._set_status("Исправленный ответ сохранён в память качества")
+
+    def _save_response_feedback(self, verdict: str, corrected_response: str) -> None:
+        self.database.execute(
+            """
+            INSERT INTO response_feedback(
+                customer_text, ocr_text, raw_response, corrected_response,
+                model_name, style_id, verdict
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                self.customer_text.toPlainText(),
+                self.ocr_text.toPlainText(),
+                self.last_generated_raw_response,
+                corrected_response,
+                self.last_generated_model,
+                self.last_generated_style_id,
+                verdict,
+            ),
+        )
 
     def apply_processing_mode(self) -> None:
         text_only = self.settings.values.processing_mode == "text_only"

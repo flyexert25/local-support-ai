@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QScrollArea,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -262,11 +263,30 @@ class SettingsDialog(QDialog):
         right_panel.setObjectName("Panel")
         right = QVBoxLayout(right_panel)
         right.setContentsMargins(12, 12, 12, 12)
+        right.setSpacing(10)
         self.style_name = QLineEdit()
         self.style_examples = QPlainTextEdit()
         self.style_examples.setPlaceholderText(
             "Вставьте сюда ваши реальные ответы. Чем больше примеров, тем точнее стиль."
         )
+        self.style_examples.setMinimumHeight(220)
+        self.style_examples_toggle = QToolButton()
+        self.style_examples_toggle.setObjectName("SectionToggle")
+        self.style_examples_toggle.setText("Примеры ваших ответов")
+        self.style_examples_toggle.setCheckable(True)
+        self.style_examples_toggle.setChecked(False)
+        self.style_examples_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.style_examples_toggle.setMinimumHeight(36)
+        self.style_examples_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.style_examples_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.style_examples_toggle.clicked.connect(self._toggle_style_examples)
+        self.style_examples_state = QLabel("Скрыто")
+        self.style_examples_state.setObjectName("Subtle")
+        self.style_examples_container = QWidget()
+        examples_layout = QVBoxLayout(self.style_examples_container)
+        examples_layout.setContentsMargins(0, 0, 0, 0)
+        examples_layout.addWidget(self.style_examples)
+        self.style_examples_container.setVisible(False)
         self.style_profile = QLabel()
         self.style_profile.setObjectName("Subtle")
         self.style_profile.setWordWrap(True)
@@ -274,12 +294,19 @@ class SettingsDialog(QDialog):
         train_button.setObjectName("Primary")
         train_button.clicked.connect(self._train_style)
 
-        right.addWidget(QLabel("Название стиля"))
+        name_label = QLabel("Название стиля")
+        name_label.setStyleSheet("font-weight: 600;")
+        right.addWidget(name_label)
         right.addWidget(self.style_name)
-        right.addWidget(QLabel("Примеры ваших ответов"))
-        right.addWidget(self.style_examples, 1)
-        right.addWidget(train_button)
+        examples_header = QHBoxLayout()
+        examples_header.addWidget(self.style_examples_toggle)
+        examples_header.addStretch(1)
+        examples_header.addWidget(self.style_examples_state)
+        right.addLayout(examples_header)
+        right.addWidget(self.style_examples_container)
         right.addWidget(self.style_profile)
+        right.addWidget(train_button)
+        right.addStretch(1)
 
         root.addWidget(left_panel, 1)
         root.addWidget(right_panel, 3)
@@ -294,6 +321,18 @@ class SettingsDialog(QDialog):
         total = self.analytics.total_generated()
         average_generation_ms = self.analytics.average_generation_ms()
         slowest_generation_ms = self.analytics.slowest_generation_ms()
+        ocr_feedback = self.analytics.ocr_feedback_totals()
+        response_feedback = self.analytics.response_feedback_totals()
+        ocr_accuracy = (
+            round(ocr_feedback["correct_count"] / ocr_feedback["total"] * 100)
+            if ocr_feedback["total"]
+            else 0
+        )
+        response_accuracy = (
+            round(response_feedback["correct_count"] / response_feedback["total"] * 100)
+            if response_feedback["total"]
+            else 0
+        )
         topic_rows = [
             self._metric_row(topic, f"{count} ответ(ов)")
             for topic, count in self.analytics.top_topics()
@@ -335,6 +374,14 @@ class SettingsDialog(QDialog):
                     self._metric_row("Сгенерировано ответов", str(total)),
                     self._metric_row("Среднее SLA генерации", self._format_duration(average_generation_ms)),
                     self._metric_row("Самая долгая генерация", self._format_duration(slowest_generation_ms)),
+                    self._metric_row("OCR проверено", str(ocr_feedback["total"])),
+                    self._metric_row("OCR без правок", str(ocr_feedback["correct_count"])),
+                    self._metric_row("OCR исправлено", str(ocr_feedback["corrected_count"])),
+                    self._metric_row("Точность OCR", f"{ocr_accuracy}%"),
+                    self._metric_row("Ответов проверено", str(response_feedback["total"])),
+                    self._metric_row("Ответов без правок", str(response_feedback["correct_count"])),
+                    self._metric_row("Ответов исправлено", str(response_feedback["corrected_count"])),
+                    self._metric_row("Точность ответа", f"{response_accuracy}%"),
                 ],
             )
         )
@@ -805,6 +852,10 @@ class SettingsDialog(QDialog):
         text_only = self.mode_text_only.isChecked()
         self.use_ocr.setEnabled(not text_only)
         self.ocr_engine.setEnabled(not text_only and self.use_ocr.isChecked())
+        if text_only:
+            self.use_ocr.setToolTip("OCR недоступен в режиме «Только текст». Переключитесь на режим со скриншотами.")
+        else:
+            self.use_ocr.setToolTip("Включает локальное OCR-распознавание для скриншотов.")
 
     def _show_profile(self, profile: dict) -> None:
         phrases = ", ".join(profile.get("typical_phrases") or [])
@@ -813,4 +864,12 @@ class SettingsDialog(QDialog):
             f"Длина: {profile.get('avg_sentence_words', 0)} слов/предложение. "
             f"Формат: {profile.get('paragraph_style', 'не определен')}. "
             f"Типичные фразы: {phrases or 'пока не выделены'}."
+        )
+
+    def _toggle_style_examples(self) -> None:
+        expanded = self.style_examples_toggle.isChecked()
+        self.style_examples_container.setVisible(expanded)
+        self.style_examples_state.setText("Открыто" if expanded else "Скрыто")
+        self.style_examples_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
         )

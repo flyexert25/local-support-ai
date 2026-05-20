@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -35,6 +36,21 @@ class LocalOnlySession(requests.Session):
 
 
 class AIManager:
+    FORBIDDEN_REPLY_PATTERNS = (
+        r"\bдосвидос\b",
+        r"\bпохер\b",
+        r"\bпофиг\b",
+        r"\bхрен\b",
+        r"\bнах\b",
+        r"\bидиот\b",
+        r"\bтуп",
+        r"\bбред\b",
+        r"\bзаткни",
+        r"\bнеинтересн\w*\b",
+        r"\bотвали\b",
+        r"\bвали\b",
+    )
+
     def __init__(self, settings: SettingsManager) -> None:
         self.settings = settings
         self.session = LocalOnlySession()
@@ -68,6 +84,7 @@ class AIManager:
         customer_text: str,
         ocr_text: str,
         style_prompt: str,
+        quality_rules: str,
         model: str,
         image_base64: str | None = None,
     ) -> str:
@@ -75,7 +92,7 @@ class AIManager:
             raise LocalNetworkError("Сетевой доступ полностью отключен. Ollama localhost недоступен.")
         if not model:
             raise ValueError("Не выбрана локальная модель Ollama.")
-        prompt = self._build_prompt(customer_text, ocr_text, style_prompt)
+        prompt = self._build_prompt(customer_text, ocr_text, style_prompt, quality_rules)
         payload: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
@@ -112,10 +129,28 @@ class AIManager:
         for prefix in prefixes:
             if cleaned.lower().startswith(prefix.lower()):
                 cleaned = cleaned[len(prefix) :].strip()
+        cleaned = AIManager._sanitize_reply(cleaned)
         return cleaned
 
     @staticmethod
-    def _build_prompt(customer_text: str, ocr_text: str, style_prompt: str) -> str:
+    def _sanitize_reply(text: str) -> str:
+        cleaned = " ".join(text.split()).strip()
+        lowered = cleaned.lower()
+        if any(re.search(pattern, lowered, re.IGNORECASE) for pattern in AIManager.FORBIDDEN_REPLY_PATTERNS):
+            sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+            safe_sentences: list[str] = []
+            for sentence in sentences:
+                lowered_sentence = sentence.lower()
+                if any(re.search(pattern, lowered_sentence, re.IGNORECASE) for pattern in AIManager.FORBIDDEN_REPLY_PATTERNS):
+                    continue
+                safe_sentences.append(sentence.strip())
+            cleaned = " ".join(part for part in safe_sentences if part).strip()
+            if not cleaned:
+                cleaned = "Понял вас. Давайте решим вопрос спокойно и по сути."
+        return cleaned
+
+    @staticmethod
+    def _build_prompt(customer_text: str, ocr_text: str, style_prompt: str, quality_rules: str) -> str:
         return (
             "Ты локальный помощник сотрудника поддержки. Никаких внешних API, никаких упоминаний AI.\n"
             "Задача: по сообщению и/или тексту со скриншота написать один готовый ответ.\n\n"
@@ -125,8 +160,13 @@ class AIManager:
             "- не добавляй выдуманные факты;\n"
             "- если данных не хватает, задай короткий уточняющий вопрос;\n"
             "- не объясняй свои рассуждения, верни только текст ответа;\n"
-            "- сохраняй спокойный дружелюбный тон.\n\n"
+            "- сохраняй спокойный дружелюбный тон;\n"
+            "- даже если пользователь пишет резко, грубо или агрессивно, не зеркаль этот тон;\n"
+            "- не используй сленг, насмешку, пассивную агрессию, хамство, сарказм и фразы вроде «досвидос», «мне неинтересно», «отвали»;\n"
+            "- если пользователь хочет прекратить диалог, сформулируй это нейтрально и уважительно.\n\n"
             f"{style_prompt}\n\n"
+            "Локальные правила качества, собранные из прошлых исправлений:\n"
+            f"{quality_rules or '- пока нет накопленных правил'}\n\n"
             "Сообщение, вставленное пользователем:\n"
             f"{customer_text.strip() or '[нет текстового сообщения]'}\n\n"
             "Текст, распознанный со скриншота:\n"

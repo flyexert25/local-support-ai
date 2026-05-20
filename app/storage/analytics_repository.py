@@ -26,6 +26,42 @@ class AnalyticsRepository:
         value = row["value"] if row else None
         return int(value or 0)
 
+    def ocr_feedback_totals(self) -> dict[str, int]:
+        row = self.database.fetch_one(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN verdict = 'correct' THEN 1 ELSE 0 END) AS correct_count,
+                SUM(CASE WHEN verdict = 'corrected' THEN 1 ELSE 0 END) AS corrected_count
+            FROM ocr_feedback
+            """
+        )
+        if not row:
+            return {"total": 0, "correct_count": 0, "corrected_count": 0}
+        return {
+            "total": int(row["total"] or 0),
+            "correct_count": int(row["correct_count"] or 0),
+            "corrected_count": int(row["corrected_count"] or 0),
+        }
+
+    def response_feedback_totals(self) -> dict[str, int]:
+        row = self.database.fetch_one(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN verdict = 'correct' THEN 1 ELSE 0 END) AS correct_count,
+                SUM(CASE WHEN verdict = 'corrected' THEN 1 ELSE 0 END) AS corrected_count
+            FROM response_feedback
+            """
+        )
+        if not row:
+            return {"total": 0, "correct_count": 0, "corrected_count": 0}
+        return {
+            "total": int(row["total"] or 0),
+            "correct_count": int(row["correct_count"] or 0),
+            "corrected_count": int(row["corrected_count"] or 0),
+        }
+
     def top_topics(self, limit: int = 8) -> list[tuple[str, int]]:
         rows = self.database.fetch_all(
             """

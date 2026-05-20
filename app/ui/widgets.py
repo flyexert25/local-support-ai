@@ -117,9 +117,14 @@ class ToggleSwitch(QAbstractButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        track_color = QColor("#48A9E6") if self.isChecked() else QColor("#303745")
-        knob_color = QColor("#F7FAFC")
-        border_color = QColor("#62B7EB") if self.isChecked() else QColor("#414A59")
+        if not self.isEnabled():
+            track_color = QColor("#2A3038") if self.isChecked() else QColor("#242932")
+            knob_color = QColor("#A7B0BC")
+            border_color = QColor("#38404D")
+        else:
+            track_color = QColor("#48A9E6") if self.isChecked() else QColor("#303745")
+            knob_color = QColor("#F7FAFC")
+            border_color = QColor("#62B7EB") if self.isChecked() else QColor("#414A59")
 
         painter.setPen(border_color)
         painter.setBrush(track_color)
@@ -141,6 +146,11 @@ class ToggleSwitch(QAbstractButton):
 
     def set_offset(self, value: float) -> None:
         self._offset = value
+        self.update()
+
+    def setEnabled(self, enabled: bool) -> None:
+        super().setEnabled(enabled)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor)
         self.update()
 
     offset = pyqtProperty(float, fget=get_offset, fset=set_offset)

@@ -72,6 +72,11 @@ class StyleManager:
         clean_name = name.strip() or "Новый стиль"
         clean_examples = examples.strip()
         profile = self.analyze_examples(clean_examples)
+        existing_profile: dict[str, Any] = {}
+        if style_id:
+            existing = self.get_style(style_id)
+            existing_profile = existing.profile if existing else {}
+        profile = self._merge_learning_profile(profile, existing_profile)
         if style_id:
             self.database.execute(
                 """
@@ -97,6 +102,7 @@ class StyleManager:
         separator = "\n\n" if style.examples.strip() else ""
         updated_examples = f"{style.examples.strip()}{separator}{clean_example}"
         self.save_style(style.name, updated_examples, style.id)
+        self._promote_priority_examples(style.id, [clean_example])
         updated = self.get_style(style.id)
         if not updated:
             raise ValueError("Не удалось обновить стиль")
@@ -179,6 +185,12 @@ class StyleManager:
             return "Пиши естественно, спокойно, без канцелярита и шаблонных AI-фраз."
         profile = style.profile
         phrases = ", ".join(profile.get("typical_phrases") or [])
+        priority_examples = [
+            str(item).strip()
+            for item in profile.get("priority_examples", [])
+            if str(item).strip()
+        ]
+        priority_block = "\n".join(f"- {example}" for example in priority_examples[:5])
         return (
             f"Имитируй стиль пользователя: {style.name}.\n"
             f"Тон: {profile.get('tone', 'естественный')}.\n"
@@ -186,10 +198,57 @@ class StyleManager:
             f"{profile.get('paragraph_style', 'короткие абзацы')}.\n"
             f"Эмоциональность: {profile.get('emotionality', 'спокойная')}.\n"
             f"Типичные фразы, если подходят по смыслу: {phrases or 'нет явных устойчивых фраз'}.\n"
+            f"Самые полезные свежие примеры, на которые стоит ориентироваться в первую очередь:\n"
+            f"{priority_block or '- пока нет сохранённых финальных примеров'}\n"
             "Не копируй примеры дословно. Сохраняй живой человеческий язык и избегай канцелярита.\n"
             "Примеры ответов пользователя:\n"
-            f"{style.examples[:3500]}"
+            f"{style.examples[:2400]}"
         )
+
+    def _promote_priority_examples(self, style_id: int, examples: list[str]) -> None:
+        style = self.get_style(style_id)
+        if not style:
+            return
+        profile = dict(style.profile)
+        existing_examples = [
+            str(item).strip()
+            for item in profile.get("priority_examples", [])
+            if str(item).strip()
+        ]
+        profile["priority_examples"] = self._dedupe_examples([*examples, *existing_examples])[:8]
+        self.database.execute(
+            """
+            UPDATE styles
+            SET profile_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (Database.encode_json(profile), style_id),
+        )
+
+    @staticmethod
+    def _merge_learning_profile(profile: dict[str, Any], existing_profile: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(profile)
+        priority_examples = [
+            str(item).strip()
+            for item in existing_profile.get("priority_examples", [])
+            if str(item).strip()
+        ]
+        if priority_examples:
+            merged["priority_examples"] = StyleManager._dedupe_examples(priority_examples)[:8]
+        return merged
+
+    @staticmethod
+    def _dedupe_examples(examples: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for example in examples:
+            clean = example.strip()
+            key = clean.lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            result.append(clean)
+        return result
 
     def _profile_with_domain_terms(self, examples: str, profile: dict[str, Any]) -> dict[str, Any]:
         if "domain_terms" in profile:

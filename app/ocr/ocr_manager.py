@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
 
+import cv2
+import numpy as np
+
+from app.core.privacy_guard import allow_hosts_temporarily
 from app.core.settings_manager import SettingsManager
 
 
@@ -30,16 +34,25 @@ class OCRManager:
         if not image_path.exists():
             raise FileNotFoundError(f"Файл не найден: {image_path}")
         reader = self._ensure_reader()
+        image = self._load_image(image_path)
         if self._engine == "paddleocr":
-            result = reader.ocr(str(image_path), cls=True)
+            result = reader.ocr(image, cls=True)
             lines: list[str] = []
             for block in result or []:
                 for item in block or []:
                     if len(item) >= 2 and item[1]:
                         lines.append(str(item[1][0]))
             return "\n".join(lines).strip()
-        results = reader.readtext(str(image_path), detail=0, paragraph=True)
+        results = reader.readtext(image, detail=0, paragraph=True)
         return "\n".join(map(str, results)).strip()
+
+    @staticmethod
+    def _load_image(image_path: Path):
+        buffer = np.frombuffer(image_path.read_bytes(), dtype=np.uint8)
+        image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+        if image is None:
+            raise RuntimeError(f"Не удалось прочитать изображение: {image_path}")
+        return image
 
     def _ensure_reader(self):
         if self._reader is not None:
@@ -54,5 +67,12 @@ class OCRManager:
             return self._reader
         import easyocr
 
-        self._reader = easyocr.Reader(languages, gpu=False, verbose=False, download_enabled=False)
+        with allow_hosts_temporarily(
+            "github.com",
+            "githubusercontent.com",
+            "raw.githubusercontent.com",
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+        ):
+            self._reader = easyocr.Reader(languages, gpu=False, verbose=False, download_enabled=True)
         return self._reader

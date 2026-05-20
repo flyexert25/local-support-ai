@@ -94,6 +94,23 @@ QToolButton {
     border-radius: 6px;
     padding: 7px;
 }
+QToolButton#SectionToggle {
+    background: #1B2230;
+    color: #E7EDF8;
+    border: 1px solid #354156;
+    border-radius: 7px;
+    font-weight: 600;
+    padding: 8px 12px;
+    text-align: left;
+}
+QToolButton#SectionToggle:hover {
+    background: #222B3A;
+    border-color: #46556F;
+}
+QToolButton#SectionToggle:checked {
+    background: #202A39;
+    border-color: #5474A3;
+}
 QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     background: #10131A;
     color: #F4F7FA;
@@ -222,6 +239,23 @@ QToolButton {
     border: 1px solid #D2DAE8;
     border-radius: 6px;
     padding: 7px;
+}
+QToolButton#SectionToggle {
+    background: #F7F9FC;
+    color: #233149;
+    border: 1px solid #D8E0ED;
+    border-radius: 7px;
+    font-weight: 600;
+    padding: 8px 12px;
+    text-align: left;
+}
+QToolButton#SectionToggle:hover {
+    background: #EEF3F9;
+    border-color: #C8D4E6;
+}
+QToolButton#SectionToggle:checked {
+    background: #ECF4FF;
+    border-color: #AFC8F0;
 }
 QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     background: #FFFFFF;

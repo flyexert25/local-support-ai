@@ -105,7 +105,7 @@ class SettingsDialog(QDialog):
         root.addWidget(
             self._section(
                 "Локальная модель",
-                "Ollama используется только через localhost. Клиентские данные не отправляются в cloud API.",
+                "Ollama используется только через localhost. Данные не отправляются в cloud API.",
                 [
                     self._field_row("Адрес Ollama", "Обычно http://localhost:11434", self.ollama_url),
                     self._field_row("Модель по умолчанию", "Например qwen2.5vl:latest", self.preferred_model),
@@ -119,7 +119,7 @@ class SettingsDialog(QDialog):
                 [
                     self._radio_row(
                         self.mode_text_only,
-                        "Быстрый режим для случаев, когда вы вставляете сообщение клиента вручную. Превью скриншота скрывается, изображение не отправляется в модель.",
+                        "Быстрый режим для случаев, когда вы вставляете сообщение вручную. Превью скриншота скрывается, изображение не отправляется в модель.",
                     ),
                     self._radio_row(
                         self.mode_vision_auto,
@@ -188,7 +188,7 @@ class SettingsDialog(QDialog):
                 "Стиль интерфейса",
                 "Приложение сделано как рабочий инструмент поддержки: без маркетинговых экранов, лишних иллюстраций и визуального шума.",
                 [
-                    self._preview_row("Основной экран", "Скриншот, текст клиента, OCR и готовый ответ остаются на одном рабочем поле."),
+                    self._preview_row("Основной экран", "Скриншот, текст обращения, OCR и готовый ответ остаются на одном рабочем поле."),
                     self._preview_row("Настройки", "Технические параметры сгруппированы в понятные секции с тумблерами."),
                 ],
             )
@@ -230,7 +230,7 @@ class SettingsDialog(QDialog):
         self.style_name = QLineEdit()
         self.style_examples = QPlainTextEdit()
         self.style_examples.setPlaceholderText(
-            "Вставьте сюда ваши реальные ответы клиентам. Чем больше примеров, тем точнее стиль."
+            "Вставьте сюда ваши реальные ответы. Чем больше примеров, тем точнее стиль."
         )
         self.style_profile = QLabel()
         self.style_profile.setObjectName("Subtle")

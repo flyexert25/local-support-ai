@@ -96,7 +96,7 @@ class MainWindow(QMainWindow):
         title_box = QVBoxLayout()
         title = QLabel("Local Support AI")
         title.setObjectName("Title")
-        subtitle = QLabel("Offline-first генератор ответов клиентам")
+        subtitle = QLabel("Offline-first генератор ответов по обращениям")
         subtitle.setObjectName("Subtle")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
@@ -134,9 +134,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.screenshot_panel, 2)
 
         self.customer_text = QPlainTextEdit()
-        self.customer_text.setPlaceholderText("Вставьте сообщение клиента или фрагмент переписки...")
+        self.customer_text.setPlaceholderText("Вставьте сообщение или фрагмент переписки...")
         self.customer_text.textChanged.connect(self.update_case_summary)
-        layout.addWidget(self._wrap_panel("Сообщение клиента", self.customer_text), 1)
+        layout.addWidget(self._wrap_panel("Сообщение", self.customer_text), 1)
 
         self.case_summary = QLabel("Признаки обращения появятся после ввода текста или OCR.")
         self.case_summary.setObjectName("Subtle")
@@ -169,7 +169,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._wrap_panel("Распознанный текст", self.ocr_text), 1)
 
         self.response_text = QPlainTextEdit()
-        self.response_text.setPlaceholderText("Готовый ответ клиенту появится здесь.")
+        self.response_text.setPlaceholderText("Готовый ответ появится здесь.")
         layout.addWidget(self._wrap_panel("Сгенерированный ответ", self.response_text), 1)
 
         buttons = QHBoxLayout()
@@ -299,7 +299,7 @@ class MainWindow(QMainWindow):
         text_only = self.settings.values.processing_mode == "text_only"
         has_image = bool(self.current_image_path or self.current_clipboard_image_base64) and not text_only
         if not customer and not ocr and not has_image:
-            QMessageBox.information(self, "Нет контекста", "Добавьте сообщение клиента или скриншот.")
+            QMessageBox.information(self, "Нет контекста", "Добавьте сообщение или скриншот.")
             return
 
         model = self.model_combo.currentText().strip() or self.settings.values.preferred_model

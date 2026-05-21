@@ -5,6 +5,7 @@ Local Support AI — локальное desktop-приложение для Wind
 Приложение работает по модели `offline-first`:
 - генерация идёт через локальный `Ollama` на `localhost`
 - OCR выполняется локально
+- экспериментальный `FastAPI` backend работает как локальный API на `127.0.0.1`
 - история, стили, аналитика и память качества хранятся в `SQLite`
 
 ## Что уже умеет
@@ -20,6 +21,7 @@ Local Support AI — локальное desktop-приложение для Wind
 - поддержка vision-моделей `qwen2.5vl`, `llava`, `minicpm-v`
 - стили общения с обучением на примерах
 - аналитика по обращениям, OCR и качеству ответов
+- локальный `FastAPI` bridge для анализа обращения
 - вкладка `Диагностика`
 - экспорт PNG-диаграммы по темам обращений
 - настройка устройства генерации `Авто / CPU / GPU`
@@ -103,6 +105,47 @@ Local Support AI — локальное desktop-приложение для Wind
 - путь к `settings.json`
 - папки логов и экспортов
 
+## Локальный FastAPI backend
+
+В проект добавлен экспериментальный `FastAPI` backend. Это не cloud API и не внешний сервис. Он запускается на этой же машине и принимает запросы только через локальный адрес:
+
+```text
+http://127.0.0.1:8000
+```
+
+Зачем он нужен:
+- отделить desktop-интерфейс от логики анализа
+- учиться backend-архитектуре на живом проекте
+- тестировать анализ обращений отдельно от PyQt-интерфейса
+- подготовить проект к будущему разделению на `UI -> local API -> analyzer/style/learning`
+
+Текущая схема:
+
+```text
+PyQt app -> local FastAPI API -> CaseAnalyzer -> JSON response -> PyQt app
+```
+
+Сейчас backend используется для анализа обращения:
+- `GET /status` — проверка, что локальный backend запущен
+- `POST /echo` — учебный endpoint для проверки POST-запросов
+- `POST /analyze-request` — анализ текста через реальный `CaseAnalyzer`
+
+Если backend недоступен, desktop-приложение не падает: оно использует локальный анализ внутри PyQt-приложения.
+
+Запуск backend для разработки:
+
+```powershell
+cd backend
+.\.venv\Scripts\Activate.ps1
+uvicorn main:app --reload
+```
+
+Swagger UI:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
 ## Приватность
 
 В проекте нет:
@@ -114,6 +157,7 @@ Local Support AI — локальное desktop-приложение для Wind
 
 Дополнительно используются защитные механизмы:
 - `LocalOnlySession` разрешает HTTP только к `localhost`
+- `BackendClient` разрешает обращения только к локальному FastAPI backend
 - `privacy_guard.py` блокирует не-localhost сетевые подключения на уровне Python-сокетов
 
 Исключение:
@@ -220,6 +264,7 @@ dist\Local Support AI\Local Support AI.exe
 │   ├── ai
 │   │   └── ai_manager.py
 │   ├── core
+│   │   ├── backend_client.py
 │   │   ├── case_analyzer.py
 │   │   ├── learning_manager.py
 │   │   ├── privacy_guard.py
@@ -241,6 +286,8 @@ dist\Local Support AI\Local Support AI.exe
 │       ├── image_utils.py
 │       └── paths.py
 ├── assets
+├── backend
+│   └── main.py
 ├── docs
 ├── scripts
 ├── LocalSupportAI.spec
@@ -264,6 +311,7 @@ dist\Local Support AI\Local Support AI.exe
 - добавили локальные `quality rules`
 - поставили анти-хамский предохранитель на финальный ответ
 - улучшили вкладку `Мой стиль общения`
+- добавили локальный `FastAPI` backend и связали его с анализом обращения
 
 ## Mockup
 

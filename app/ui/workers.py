@@ -6,6 +6,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from app.ai.ai_manager import AIManager
+from app.core.backend_client import BackendClient
 from app.ocr.ocr_manager import OCRManager
 
 
@@ -61,6 +62,35 @@ class GenerateWorker(QObject):
             )
             elapsed_ms = (perf_counter() - started_at) * 1000
             self.finished.emit(reply, elapsed_ms)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class BackendAnalyzeWorker(QObject):
+    finished = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        backend_client: BackendClient,
+        customer_text: str,
+        ocr_text: str,
+        selected_style: str | None,
+    ) -> None:
+        super().__init__()
+        self.backend_client = backend_client
+        self.customer_text = customer_text
+        self.ocr_text = ocr_text
+        self.selected_style = selected_style
+
+    def run(self) -> None:
+        try:
+            payload = self.backend_client.analyze_request(
+                customer_text=self.customer_text,
+                ocr_text=self.ocr_text,
+                selected_style=self.selected_style,
+            )
+            self.finished.emit(payload)
         except Exception as exc:
             self.failed.emit(str(exc))
 

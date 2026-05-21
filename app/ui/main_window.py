@@ -22,7 +22,8 @@ from PyQt6.QtWidgets import (
 )
 
 from app.ai.ai_manager import AIManager
-from app.core.case_analyzer import CaseAnalyzer
+from app.core.backend_client import BackendClient
+from app.core.case_analyzer import CaseAnalysis, CaseAnalyzer
 from app.core.learning_manager import LearningManager
 from app.core.privacy_guard import set_allow_localhost
 from app.core.settings_manager import SettingsManager
@@ -32,7 +33,7 @@ from app.styles.style_manager import StyleManager
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.theme import apply_theme
 from app.ui.widgets import ScreenshotDropZone, StatusPill
-from app.ui.workers import GenerateWorker, OCRWorker, start_worker
+from app.ui.workers import BackendAnalyzeWorker, GenerateWorker, OCRWorker, start_worker
 from app.utils.image_utils import image_path_to_base64, load_pixmap, qimage_to_base64, qimage_to_png_bytes
 
 
@@ -51,6 +52,7 @@ class MainWindow(QMainWindow):
         self.style_manager = style_manager
         self.ai_manager = ai_manager
         self.ocr_manager = ocr_manager
+        self.backend_client = BackendClient(settings)
         self.case_analyzer = CaseAnalyzer()
         self.learning_manager = LearningManager(database)
         self.current_image_path: Path | None = None
@@ -59,6 +61,7 @@ class MainWindow(QMainWindow):
         self.last_generated_raw_response: str = ""
         self.last_generated_model: str = ""
         self.last_generated_style_id: int | None = None
+        self._busy = False
         self.threads = []
         self.workers = []
 
@@ -251,17 +254,11 @@ class MainWindow(QMainWindow):
 
         if self.settings.values.processing_mode == "text_only":
             self.ocr_pill.set_state("OCR скрыт", True)
-            self.analyze_button.setEnabled(False)
-            self.analyze_button.setToolTip("В режиме «Только текст» скриншоты и OCR скрыты")
         elif self.settings.values.use_ocr:
             ocr_status = self.ocr_manager.status()
             self.ocr_pill.set_state("OCR готов" if ocr_status.ready else "OCR не готов", ocr_status.ready)
-            self.analyze_button.setEnabled(True)
-            self.analyze_button.setToolTip("Распознать текст со скриншота локально")
         else:
             self.ocr_pill.set_state("OCR выключен", True)
-            self.analyze_button.setEnabled(False)
-            self.analyze_button.setToolTip("Включите OCR в настройках, если нужен распознанный текст")
 
         status = self.ai_manager.check_status()
         self.model_combo.blockSignals(True)
@@ -283,6 +280,7 @@ class MainWindow(QMainWindow):
             self._set_status(status.message + " Установка: ollama pull qwen2.5vl")
         else:
             self._set_status(status.message)
+        self._refresh_analyze_button_state()
 
     def open_image_dialog(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
@@ -316,26 +314,62 @@ class MainWindow(QMainWindow):
         self._set_response_feedback_enabled(False)
         self.drop_zone.set_pixmap(pixmap)
         self._set_status(f"Скриншот загружен: {path.name}")
+        self._refresh_analyze_button_state()
 
     def analyze_screenshot(self) -> None:
-        if self.settings.values.processing_mode == "text_only":
-            QMessageBox.information(self, "Режим только текста", "В этом режиме скриншоты и OCR не используются.")
+        customer = self.customer_text.toPlainText().strip()
+        ocr = self.ocr_text.toPlainText().strip()
+        text_only = self.settings.values.processing_mode == "text_only"
+
+        if not text_only and self.current_image_path and self.settings.values.use_ocr:
+            self._set_busy(True)
+            worker = OCRWorker(self.ocr_manager, self.current_image_path)
+            worker.finished.connect(self._ocr_finished)
+            worker.failed.connect(self._worker_failed)
+            worker.finished.connect(lambda: self._forget_worker(worker))
+            worker.failed.connect(lambda _: self._forget_worker(worker))
+            self.workers.append(worker)
+            self.threads.append(start_worker(worker))
+            self._set_status("OCR распознает текст локально...")
             return
-        if not self.settings.values.use_ocr:
+
+        if customer or ocr:
+            self._run_backend_analysis(customer, ocr)
+            return
+
+        if self.current_image_path and not self.settings.values.use_ocr:
             QMessageBox.information(self, "OCR выключен", "Включите OCR в настройках, если хотите распознавать текст.")
             return
-        if not self.current_image_path:
-            QMessageBox.information(self, "Нет скриншота", "Загрузите или вставьте скриншот перед анализом.")
+
+        if text_only:
+            QMessageBox.information(self, "Нет текста", "Введите сообщение, чтобы запустить анализ обращения.")
             return
+
+        QMessageBox.information(self, "Нет данных", "Добавьте сообщение или загрузите скриншот перед анализом.")
+
+    def _run_backend_analysis(self, customer_text: str, ocr_text: str) -> None:
+        style = self.style_manager.get_style(self.settings.values.selected_style_id)
         self._set_busy(True)
-        worker = OCRWorker(self.ocr_manager, self.current_image_path)
-        worker.finished.connect(self._ocr_finished)
-        worker.failed.connect(self._worker_failed)
-        worker.finished.connect(lambda: self._forget_worker(worker))
+        worker = BackendAnalyzeWorker(
+            self.backend_client,
+            customer_text=customer_text,
+            ocr_text=ocr_text,
+            selected_style=style.name if style else None,
+        )
+        worker.finished.connect(self._backend_analysis_finished)
+        worker.failed.connect(
+            lambda message, customer=customer_text, ocr=ocr_text, profile=style.profile if style else None: self._backend_analysis_failed(
+                message,
+                customer,
+                ocr,
+                profile,
+            )
+        )
+        worker.finished.connect(lambda *_: self._forget_worker(worker))
         worker.failed.connect(lambda _: self._forget_worker(worker))
         self.workers.append(worker)
         self.threads.append(start_worker(worker))
-        self._set_status("OCR распознает текст локально...")
+        self._set_status("FastAPI анализирует обращение...")
 
     def generate_reply(self) -> None:
         customer = self.customer_text.toPlainText().strip()
@@ -400,6 +434,7 @@ class MainWindow(QMainWindow):
         self._set_response_feedback_enabled(False)
         self.drop_zone.set_pixmap(None)
         self._set_status("Очищено")
+        self._refresh_analyze_button_state()
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(
@@ -434,6 +469,7 @@ class MainWindow(QMainWindow):
                 self._set_response_feedback_enabled(False)
                 self.drop_zone.set_pixmap(load_pixmap(temp_path))
                 self._set_status("Скриншот вставлен из буфера обмена")
+                self._refresh_analyze_button_state()
                 return
         super().keyPressEvent(event)
 
@@ -442,14 +478,40 @@ class MainWindow(QMainWindow):
         learned = self.learning_manager.apply_ocr_memory(text or "")
         self.ocr_text.setPlainText(learned.text)
         self._set_ocr_feedback_enabled(bool(text))
-        self._set_busy(False)
         if not text:
+            self._set_busy(False)
             self._set_status("OCR завершен, текст не найден")
         elif learned.replacements:
             preview = ", ".join(f"{source} -> {target}" for source, target in learned.replacements[:3])
             self._set_status(f"OCR завершен · автокоррекция: {preview}")
+            self._set_busy(False)
+            self._run_backend_analysis(self.customer_text.toPlainText().strip(), learned.text)
         else:
             self._set_status("OCR завершен")
+            self._set_busy(False)
+            self._run_backend_analysis(self.customer_text.toPlainText().strip(), learned.text)
+
+    def _backend_analysis_finished(self, payload: dict) -> None:
+        self.case_summary.setText(self._format_analysis_payload(payload))
+        topic = str(payload.get("topic", "Общее обращение"))
+        self._set_status(f"FastAPI анализ завершён · тема: {topic}")
+        self._set_busy(False)
+
+    def _backend_analysis_failed(
+        self,
+        message: str,
+        customer_text: str,
+        ocr_text: str,
+        style_profile: dict | None,
+    ) -> None:
+        analysis = self.case_analyzer.analyze(
+            customer_text,
+            ocr_text,
+            style_profile=style_profile,
+        )
+        self.case_summary.setText(analysis.to_display_text())
+        self._set_status(f"{message} Использован локальный анализ.")
+        self._set_busy(False)
 
     def _generation_finished(
         self,
@@ -504,13 +566,10 @@ class MainWindow(QMainWindow):
         self._set_status(message)
 
     def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
         for button in [self.load_button, self.generate_button, self.save_to_style_button, self.clear_button]:
             button.setEnabled(not busy)
-        self.analyze_button.setEnabled(
-            not busy
-            and self.settings.values.use_ocr
-            and self.settings.values.processing_mode != "text_only"
-        )
+        self._refresh_analyze_button_state()
         self.refresh_button.setEnabled(not busy)
 
         has_ocr_feedback = bool(self.last_ocr_raw_text)
@@ -609,7 +668,7 @@ class MainWindow(QMainWindow):
         text_only = self.settings.values.processing_mode == "text_only"
         self.screenshot_panel.setVisible(not text_only)
         self.load_button.setVisible(not text_only)
-        self.analyze_button.setVisible(not text_only)
+        self.analyze_button.setVisible(True)
         if text_only:
             self.current_image_path = None
             self.current_clipboard_image_base64 = None
@@ -617,6 +676,7 @@ class MainWindow(QMainWindow):
             self._set_status("Быстрый режим: генерация только по тексту")
         else:
             self._set_status("Режим со скриншотами: изображение используется, если оно загружено")
+        self._refresh_analyze_button_state()
 
     def _set_status(self, message: str) -> None:
         self.status_message.setText(message)
@@ -650,6 +710,7 @@ class MainWindow(QMainWindow):
         ocr = self.ocr_text.toPlainText().strip()
         if not text and not ocr:
             self.case_summary.setText("Признаки обращения появятся после ввода текста или OCR.")
+            self._refresh_analyze_button_state()
             return
         style = self.style_manager.get_style(self.settings.values.selected_style_id)
         analysis = self.case_analyzer.analyze(
@@ -658,6 +719,50 @@ class MainWindow(QMainWindow):
             style_profile=style.profile if style else None,
         )
         self.case_summary.setText(analysis.to_display_text())
+        self._refresh_analyze_button_state()
+
+    def _refresh_analyze_button_state(self) -> None:
+        has_text = bool(self.customer_text.toPlainText().strip() or self.ocr_text.toPlainText().strip())
+        can_use_ocr = (
+            self.settings.values.processing_mode != "text_only"
+            and self.settings.values.use_ocr
+            and bool(self.current_image_path)
+        )
+        enabled = not self._busy and (has_text or can_use_ocr)
+        self.analyze_button.setEnabled(enabled)
+        if self._busy:
+            self.analyze_button.setToolTip("Дождитесь завершения текущей операции.")
+        elif can_use_ocr:
+            self.analyze_button.setToolTip("Сначала OCR, затем анализ обращения через FastAPI.")
+        elif has_text:
+            self.analyze_button.setToolTip("Анализировать обращение через FastAPI.")
+        elif self.settings.values.processing_mode == "text_only":
+            self.analyze_button.setToolTip("Введите сообщение, чтобы запустить анализ.")
+        elif not self.settings.values.use_ocr:
+            self.analyze_button.setToolTip("Включите OCR или введите текст вручную.")
+        else:
+            self.analyze_button.setToolTip("Загрузите скриншот или введите сообщение.")
+
+    @staticmethod
+    def _format_analysis_payload(payload: dict) -> str:
+        topic = str(payload.get("topic", "Общее обращение"))
+        signals = payload.get("signals", [])
+        if not isinstance(signals, list):
+            signals = []
+        extracted = payload.get("extracted", {})
+        if not isinstance(extracted, dict):
+            extracted = {}
+        normalized_extracted = {
+            "amounts": [str(item) for item in extracted.get("amounts", [])][:8],
+            "dates": [str(item) for item in extracted.get("dates", [])][:8],
+            "mcc_codes": [str(item) for item in extracted.get("mcc_codes", [])][:12],
+        }
+        analysis = CaseAnalysis(
+            topic=topic,
+            signals=[str(item) for item in signals],
+            extracted=normalized_extracted,
+        )
+        return analysis.to_display_text()
 
     def _forget_worker(self, worker) -> None:
         if worker in self.workers:

@@ -25,8 +25,40 @@ class CaseAnalysis:
 
 
 class CaseAnalyzer:
+    INTEREST_MARKERS: tuple[str, ...] = (
+        "процент",
+        "проценты",
+        "льготн",
+    )
+
+    CASH_LOAN_MARKERS: tuple[str, ...] = (
+        "кредит наличными",
+        "по кредиту наличными",
+        "наличными",
+        "потребительский кредит",
+        "потребкредит",
+        "ежемесячный платеж",
+        "ежемесячный платёж",
+        "график платеж",
+        "график оплат",
+    )
+
+    CREDIT_CARD_MARKERS: tuple[str, ...] = (
+        "кредитная карта",
+        "кредитке",
+        "кредиткой",
+        "по карте",
+        "льготн",
+        "выписк",
+        "платежный период",
+        "платёжный период",
+        "минимальный платеж",
+        "минимальный платёж",
+    )
+
     TOPIC_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("Проценты / кредитная карта", ("процент", "льготн", "кредитн", "выписк", "платежный период")),
+        ("Проценты / кредит наличными", ("кредит наличными", "по кредиту наличными", "потребительский кредит", "график платеж", "ежемесячный платеж", "ежемесячный платёж")),
+        ("Проценты / кредитная карта", ("кредитная карта", "кредитке", "кредиткой", "льготн", "выписк", "платежный период", "платёжный период", "минимальный платеж", "минимальный платёж")),
         ("Арест / блокировка счетов", ("арест", "блокиров", "взыск", "долг", "пристав", "исполнительн")),
         ("Возврат / отмена покупки", ("возврат", "отмен", "вернут", "верн", "магазин", "продавец")),
         ("Премиум / подписка", ("премиум", "premium", "обслуживан", "2990", "2 990", "подписк")),
@@ -53,23 +85,63 @@ class CaseAnalyzer:
     def analyze(self, *parts: str, style_profile: dict[str, Any] | None = None) -> CaseAnalysis:
         text = "\n".join(part for part in parts if part).strip()
         lowered = text.lower()
-        topic = self._detect_topic(lowered)
+        topic = self._detect_topic(lowered, style_profile=style_profile)
         if topic == "Общее обращение" and style_profile:
             topic = self._detect_style_topic(lowered, style_profile)
         signals = self._detect_signals(lowered)
         extracted = self._extract_entities(text)
         return CaseAnalysis(topic=topic, signals=signals, extracted=extracted)
 
-    def _detect_topic(self, lowered: str) -> str:
-        scores: list[tuple[int, str]] = []
+    def _detect_topic(self, lowered: str, style_profile: dict[str, Any] | None = None) -> str:
+        has_interest = any(marker in lowered for marker in self.INTEREST_MARKERS)
+        product = self._detect_credit_product(lowered)
+
+        if has_interest and product == "cash_loan":
+            return "Проценты / кредит наличными"
+
+        if has_interest and product == "credit_card":
+            return "Проценты / кредитная карта"
+
+        if has_interest and "кредит" in lowered:
+            return "Проценты / кредит"
+
+        topic_scores: dict[str, int] = {}
         for topic, markers in self.TOPIC_RULES:
             score = sum(1 for marker in markers if marker in lowered)
             if score:
-                scores.append((score, topic))
-        if not scores:
+                topic_scores[topic] = topic_scores.get(topic, 0) + score
+
+        if style_profile:
+            for topic, score in self._score_style_topics(lowered, style_profile).items():
+                topic_scores[topic] = topic_scores.get(topic, 0) + score
+
+        if not topic_scores:
             return "Общее обращение"
-        scores.sort(reverse=True)
-        return scores[0][1]
+        return max(topic_scores.items(), key=lambda item: (item[1], item[0]))[0]
+
+    def _detect_credit_product(self, lowered: str) -> str | None:
+        cash_score = sum(1 for marker in self.CASH_LOAN_MARKERS if marker in lowered)
+        card_score = sum(1 for marker in self.CREDIT_CARD_MARKERS if marker in lowered)
+
+        if "наличн" in lowered:
+            cash_score += 2
+        if "потребительск" in lowered:
+            cash_score += 2
+        if "график платеж" in lowered or "ежемесяч" in lowered:
+            cash_score += 1
+
+        if "кредитн" in lowered and "карт" in lowered:
+            card_score += 2
+        if "карта" in lowered and "льгот" in lowered:
+            card_score += 1
+
+        if cash_score == 0 and card_score == 0:
+            return None
+        if cash_score > card_score:
+            return "cash_loan"
+        if card_score > cash_score:
+            return "credit_card"
+        return None
 
     def _detect_signals(self, lowered: str) -> list[str]:
         signals: list[str] = []
@@ -85,6 +157,35 @@ class CaseAnalyzer:
             return "Общее обращение"
         best = sorted(matches, key=len, reverse=True)[0]
         return f"Тема из стиля: {best}"
+
+    def _score_style_topics(self, lowered: str, style_profile: dict[str, Any]) -> dict[str, int]:
+        scores: dict[str, int] = {}
+        raw_hints = style_profile.get("topic_hints", [])
+        if not isinstance(raw_hints, list):
+            return scores
+
+        for item in raw_hints:
+            if not isinstance(item, dict):
+                continue
+            topic = str(item.get("name", "")).strip()
+            if not topic:
+                continue
+            markers = [
+                str(marker).strip().lower()
+                for marker in item.get("markers", [])
+                if str(marker).strip()
+            ]
+            if not markers:
+                continue
+            score = sum(1 for marker in markers if len(marker) >= 4 and marker in lowered)
+            if not score:
+                continue
+            try:
+                hits = int(item.get("hits", 1) or 1)
+            except Exception:
+                hits = 1
+            scores[topic] = scores.get(topic, 0) + score + min(max(hits, 1), 3) - 1
+        return scores
 
     def _extract_entities(self, text: str) -> dict[str, list[str]]:
         amount_matches = list(self.AMOUNT_RE.finditer(text))

@@ -32,7 +32,7 @@ from app.storage.database import Database
 from app.styles.style_manager import StyleManager
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.theme import apply_theme
-from app.ui.widgets import ScreenshotDropZone, StatusPill
+from app.ui.widgets import CaseInsightPanel, ScreenshotDropZone, StatusPill
 from app.ui.workers import BackendAnalyzeWorker, GenerateWorker, OCRWorker, start_worker
 from app.utils.image_utils import image_path_to_base64, load_pixmap, qimage_to_base64, qimage_to_png_bytes
 
@@ -101,7 +101,7 @@ class MainWindow(QMainWindow):
         top = QWidget()
         top.setObjectName("TopBar")
         layout = QHBoxLayout(top)
-        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setContentsMargins(16, 10, 16, 10)
         title_box = QVBoxLayout()
         title = QLabel("Local Support AI")
         title.setObjectName("Title")
@@ -147,16 +147,14 @@ class MainWindow(QMainWindow):
         self.customer_text.textChanged.connect(self.update_case_summary)
         layout.addWidget(self._wrap_panel("Сообщение", self.customer_text), 1)
 
-        self.case_summary = QLabel("Признаки обращения появятся после ввода текста или OCR.")
-        self.case_summary.setObjectName("Subtle")
-        self.case_summary.setWordWrap(True)
+        self.case_summary = CaseInsightPanel()
         layout.addWidget(self._wrap_panel("Аналитика обращения", self.case_summary), 0)
 
         buttons = QGridLayout()
         self.load_button = QPushButton("Загрузить скриншот")
         self.load_button.clicked.connect(self.open_image_dialog)
         self.analyze_button = QPushButton("Анализировать")
-        self.analyze_button.setObjectName("Primary")
+        self.analyze_button.setObjectName("Secondary")
         self.analyze_button.clicked.connect(self.analyze_screenshot)
         self.clear_button = QPushButton("Очистить")
         self.clear_button.clicked.connect(self.clear_all)
@@ -176,9 +174,10 @@ class MainWindow(QMainWindow):
         self.ocr_text.setPlaceholderText("Здесь появится распознанный текст со скриншота. Можно редактировать вручную.")
         self.ocr_text.textChanged.connect(self.update_case_summary)
         self.ocr_feedback_correct_button = QPushButton("OCR верно")
-        self.ocr_feedback_correct_button.setObjectName("Ghost")
+        self.ocr_feedback_correct_button.setObjectName("Tiny")
         self.ocr_feedback_correct_button.clicked.connect(self.mark_ocr_correct)
         self.ocr_feedback_save_button = QPushButton("Сохранить исправленный текст")
+        self.ocr_feedback_save_button.setObjectName("Tiny")
         self.ocr_feedback_save_button.clicked.connect(self.save_corrected_ocr_text)
         ocr_actions = QHBoxLayout()
         ocr_actions.addStretch(1)
@@ -196,9 +195,10 @@ class MainWindow(QMainWindow):
         self.response_text = QPlainTextEdit()
         self.response_text.setPlaceholderText("Готовый ответ появится здесь.")
         self.response_feedback_correct_button = QPushButton("Ответ верный")
-        self.response_feedback_correct_button.setObjectName("Ghost")
+        self.response_feedback_correct_button.setObjectName("Tiny")
         self.response_feedback_correct_button.clicked.connect(self.mark_response_correct)
         self.response_feedback_save_button = QPushButton("Сохранить исправленный ответ")
+        self.response_feedback_save_button.setObjectName("Tiny")
         self.response_feedback_save_button.clicked.connect(self.save_corrected_response)
         response_actions = QHBoxLayout()
         response_actions.addStretch(1)
@@ -234,7 +234,9 @@ class MainWindow(QMainWindow):
         frame.setObjectName("Panel")
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
         label = QLabel(title)
+        label.setObjectName("PanelTitle")
         label.setStyleSheet("font-weight: 700;")
         layout.addWidget(label)
         layout.addWidget(child, 1)
@@ -415,8 +417,18 @@ class MainWindow(QMainWindow):
             return
         try:
             updated = self.style_manager.append_example(style.id, text)
+            self.style_manager.learn_from_confirmed_interaction(
+                updated.id,
+                self.customer_text.toPlainText(),
+                text,
+                self.case_analyzer.analyze(
+                    self.customer_text.toPlainText(),
+                    self.ocr_text.toPlainText(),
+                    style_profile=updated.profile,
+                ).topic,
+            )
             self.settings.update(selected_style_id=updated.id)
-            self._set_status(f"Ответ сохранён в стиль: {updated.name}")
+            self._set_status(f"Ответ сохранён в стиль и усилил контекст: {updated.name}")
         except Exception as exc:
             QMessageBox.warning(self, "Не удалось сохранить в стиль", str(exc))
 
@@ -492,7 +504,7 @@ class MainWindow(QMainWindow):
             self._run_backend_analysis(self.customer_text.toPlainText().strip(), learned.text)
 
     def _backend_analysis_finished(self, payload: dict) -> None:
-        self.case_summary.setText(self._format_analysis_payload(payload))
+        self._show_analysis_payload(payload, "FastAPI")
         topic = str(payload.get("topic", "Общее обращение"))
         self._set_status(f"FastAPI анализ завершён · тема: {topic}")
         self._set_busy(False)
@@ -509,7 +521,7 @@ class MainWindow(QMainWindow):
             ocr_text,
             style_profile=style_profile,
         )
-        self.case_summary.setText(analysis.to_display_text())
+        self._show_case_analysis(analysis, "Fallback")
         self._set_status(f"{message} Использован локальный анализ.")
         self._set_busy(False)
 
@@ -552,7 +564,7 @@ class MainWindow(QMainWindow):
                     int(elapsed_ms),
                 ),
             )
-            self.case_summary.setText(analysis.to_display_text())
+            self._show_case_analysis(analysis, "Локально")
             self._set_status(f"Ответ сгенерирован локально · SLA {self._format_duration(elapsed_ms)}")
         except Exception as exc:
             QMessageBox.warning(self, "Ошибка после генерации", str(exc))
@@ -627,7 +639,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Нет ответа", "Сначала сгенерируйте ответ.")
             return
         self._save_response_feedback("correct", text)
-        self._set_status("Ответ отмечен как удачный")
+        learned = self._auto_learn_from_response(text, store_example=False)
+        if learned:
+            self._set_status(f"Ответ отмечен как удачный и усилил стиль: {learned.name}")
+        else:
+            self._set_status("Ответ отмечен как удачный")
 
     def save_corrected_response(self) -> None:
         corrected_text = self.response_text.toPlainText().strip()
@@ -635,14 +651,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Нет исходного ответа", "Сначала сгенерируйте ответ, затем при необходимости исправьте его.")
             return
         self._save_response_feedback("corrected", corrected_text)
-        if self.last_generated_style_id:
-            try:
-                self.style_manager.append_example(self.last_generated_style_id, corrected_text)
-                self._set_status("Исправленный ответ сохранён и добавлен в стиль")
-                return
-            except Exception:
-                pass
-        self._set_status("Исправленный ответ сохранён в память качества")
+        learned = self._auto_learn_from_response(corrected_text, store_example=True)
+        if learned:
+            self._set_status(f"Исправленный ответ сохранён и усилил стиль: {learned.name}")
+        else:
+            self._set_status("Исправленный ответ сохранён в память качества")
 
     def _save_response_feedback(self, verdict: str, corrected_response: str) -> None:
         self.database.execute(
@@ -663,6 +676,28 @@ class MainWindow(QMainWindow):
                 verdict,
             ),
         )
+
+    def _auto_learn_from_response(self, final_response: str, *, store_example: bool) -> object | None:
+        style_id = self.last_generated_style_id or self.settings.values.selected_style_id
+        if not style_id:
+            return None
+        style = self.style_manager.get_style(style_id)
+        if not style:
+            return None
+        analysis = self.case_analyzer.analyze(
+            self.customer_text.toPlainText(),
+            self.ocr_text.toPlainText(),
+            style_profile=style.profile,
+        )
+        updated = self.style_manager.learn_from_confirmed_interaction(
+            style_id,
+            self.customer_text.toPlainText(),
+            final_response,
+            analysis.topic,
+            store_example=store_example,
+        )
+        self.settings.update(selected_style_id=updated.id)
+        return updated
 
     def apply_processing_mode(self) -> None:
         text_only = self.settings.values.processing_mode == "text_only"
@@ -709,7 +744,7 @@ class MainWindow(QMainWindow):
         text = self.customer_text.toPlainText().strip()
         ocr = self.ocr_text.toPlainText().strip()
         if not text and not ocr:
-            self.case_summary.setText("Признаки обращения появятся после ввода текста или OCR.")
+            self.case_summary.set_placeholder("Признаки появятся после ввода текста или OCR.")
             self._refresh_analyze_button_state()
             return
         style = self.style_manager.get_style(self.settings.values.selected_style_id)
@@ -718,7 +753,7 @@ class MainWindow(QMainWindow):
             ocr,
             style_profile=style.profile if style else None,
         )
-        self.case_summary.setText(analysis.to_display_text())
+        self._show_case_analysis(analysis, "Предпросмотр")
         self._refresh_analyze_button_state()
 
     def _refresh_analyze_button_state(self) -> None:
@@ -743,8 +778,15 @@ class MainWindow(QMainWindow):
         else:
             self.analyze_button.setToolTip("Загрузите скриншот или введите сообщение.")
 
-    @staticmethod
-    def _format_analysis_payload(payload: dict) -> str:
+    def _show_case_analysis(self, analysis: CaseAnalysis, source: str) -> None:
+        self.case_summary.set_analysis(
+            topic=analysis.topic,
+            signals=analysis.signals,
+            extracted=analysis.extracted,
+            source=source,
+        )
+
+    def _show_analysis_payload(self, payload: dict, source: str) -> None:
         topic = str(payload.get("topic", "Общее обращение"))
         signals = payload.get("signals", [])
         if not isinstance(signals, list):
@@ -762,7 +804,7 @@ class MainWindow(QMainWindow):
             signals=[str(item) for item in signals],
             extracted=normalized_extracted,
         )
-        return analysis.to_display_text()
+        self._show_case_analysis(analysis, source)
 
     def _forget_worker(self, worker) -> None:
         if worker in self.workers:

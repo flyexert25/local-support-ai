@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, pyqtProperty, pyqtSignal
 from PyQt6.QtGui import QColor, QDragEnterEvent, QDropEvent, QPainter, QPixmap
-from PyQt6.QtWidgets import QAbstractButton, QFrame, QLabel, QVBoxLayout
+from PyQt6.QtWidgets import QAbstractButton, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from app.utils.image_utils import SUPPORTED_IMAGE_EXTENSIONS
 
@@ -16,7 +16,7 @@ class StatusPill(QLabel):
         self.setObjectName("StatusPill")
         self.setTextFormat(Qt.TextFormat.RichText)
         self._ok = True
-        self.setMinimumHeight(30)
+        self.setMinimumHeight(26)
         self.set_state(text, True)
 
     def set_color(self, color: str) -> None:
@@ -96,6 +96,80 @@ class ScreenshotDropZone(QFrame):
         self.setProperty("active", False)
         self.style().unpolish(self)
         self.style().polish(self)
+
+
+class CaseInsightPanel(QFrame):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("InsightPanel")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
+
+        self.topic_label = QLabel("Предмет не определён")
+        self.topic_label.setObjectName("InsightTopic")
+        self.source_label = QLabel("Локально")
+        self.source_label.setObjectName("InsightSource")
+        top_row.addWidget(self.topic_label, 1)
+        top_row.addWidget(self.source_label)
+        layout.addLayout(top_row)
+
+        self.signals_widget = QWidget()
+        self.signals_layout = QHBoxLayout(self.signals_widget)
+        self.signals_layout.setContentsMargins(0, 0, 0, 0)
+        self.signals_layout.setSpacing(6)
+        layout.addWidget(self.signals_widget)
+
+        self.details_label = QLabel("Признаки появятся после ввода текста или OCR.")
+        self.details_label.setObjectName("InsightDetails")
+        self.details_label.setWordWrap(True)
+        layout.addWidget(self.details_label)
+        self.set_placeholder()
+
+    def set_placeholder(self, text: str = "Признаки появятся после ввода текста или OCR.") -> None:
+        self.topic_label.setText("Предмет не определён")
+        self.source_label.setText("Ожидание")
+        self._set_chips([])
+        self.details_label.setText(text)
+
+    def set_analysis(
+        self,
+        topic: str,
+        signals: list[str],
+        extracted: dict[str, list[str]],
+        source: str = "Локально",
+    ) -> None:
+        self.topic_label.setText(topic or "Предмет не определён")
+        self.source_label.setText(source)
+        self._set_chips(signals[:4])
+
+        details: list[str] = []
+        if extracted.get("amounts"):
+            details.append("Суммы: " + ", ".join(extracted["amounts"][:3]))
+        if extracted.get("dates"):
+            details.append("Даты: " + ", ".join(extracted["dates"][:3]))
+        if extracted.get("mcc_codes"):
+            details.append("MCC: " + ", ".join(extracted["mcc_codes"][:4]))
+        self.details_label.setText(" · ".join(details) if details else "Явных деталей пока нет.")
+
+    def _set_chips(self, values: list[str]) -> None:
+        while self.signals_layout.count():
+            item = self.signals_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        if not values:
+            values = ["явных признаков пока нет"]
+        for value in values:
+            chip = QLabel(value)
+            chip.setObjectName("InsightChip")
+            self.signals_layout.addWidget(chip)
+        self.signals_layout.addStretch(1)
 
 
 class ToggleSwitch(QAbstractButton):

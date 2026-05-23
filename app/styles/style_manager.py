@@ -172,6 +172,7 @@ class StyleManager:
             "question_ratio": round(question_count / max(len(sentences), 1), 2),
             "typical_phrases": typical_phrases[:8],
             "domain_terms": domain_terms[:30],
+            "topic_hints": [],
             "avoid": [
                 "AI-клише",
                 "канцелярит",
@@ -180,29 +181,95 @@ class StyleManager:
             ],
         }
 
+    def learn_from_confirmed_interaction(
+        self,
+        style_id: int,
+        customer_text: str,
+        final_response: str,
+        topic: str | None = None,
+        *,
+        store_example: bool = False,
+    ) -> CommunicationStyle:
+        style = self.get_style(style_id)
+        if not style:
+            raise ValueError("Активный стиль не найден")
+
+        clean_response = final_response.strip()
+        if store_example and clean_response:
+            style = self.append_example(style_id, clean_response)
+        else:
+            style = self.get_style(style_id) or style
+
+        profile = dict(style.profile)
+        if clean_response:
+            existing_examples = [
+                str(item).strip()
+                for item in profile.get("priority_examples", [])
+                if str(item).strip()
+            ]
+            profile["priority_examples"] = self._dedupe_examples([clean_response, *existing_examples])[:8]
+
+        markers = self._extract_context_markers(customer_text, clean_response)
+        if markers:
+            existing_terms = [
+                str(item).strip()
+                for item in profile.get("domain_terms", [])
+                if str(item).strip()
+            ]
+            profile["domain_terms"] = self._dedupe_terms([*markers, *existing_terms])[:40]
+
+        clean_topic = (topic or "").strip()
+        if clean_topic and clean_topic != "Общее обращение":
+            existing_hints = profile.get("topic_hints", [])
+            profile["topic_hints"] = self._merge_topic_hints(
+                existing_hints,
+                clean_topic,
+                markers,
+                customer_text,
+            )
+
+        self.database.execute(
+            """
+            UPDATE styles
+            SET profile_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (Database.encode_json(profile), style_id),
+        )
+        updated = self.get_style(style_id)
+        if not updated:
+            raise ValueError("Не удалось обновить стиль")
+        return updated
+
     def build_style_prompt(self, style: CommunicationStyle | None) -> str:
         if not style:
             return "Пиши естественно, спокойно, без канцелярита и шаблонных AI-фраз."
         profile = style.profile
-        phrases = ", ".join(profile.get("typical_phrases") or [])
         priority_examples = [
             str(item).strip()
             for item in profile.get("priority_examples", [])
             if str(item).strip()
         ]
-        priority_block = "\n".join(f"- {example}" for example in priority_examples[:5])
+        priority_block = "\n".join(
+            f"- {self._short_example(example, 180)}"
+            for example in priority_examples[:3]
+        )
+        terms = self._short_terms(profile.get("domain_terms", []), 8)
+        topics = self._short_terms(
+            [item.get("name", "") for item in profile.get("topic_hints", []) if isinstance(item, dict)],
+            4,
+        )
         return (
             f"Имитируй стиль пользователя: {style.name}.\n"
             f"Тон: {profile.get('tone', 'естественный')}.\n"
             f"Длина: примерно {profile.get('avg_sentence_words', 12)} слов в предложении; "
             f"{profile.get('paragraph_style', 'короткие абзацы')}.\n"
             f"Эмоциональность: {profile.get('emotionality', 'спокойная')}.\n"
-            f"Типичные фразы, если подходят по смыслу: {phrases or 'нет явных устойчивых фраз'}.\n"
-            f"Самые полезные свежие примеры, на которые стоит ориентироваться в первую очередь:\n"
-            f"{priority_block or '- пока нет сохранённых финальных примеров'}\n"
-            "Не копируй примеры дословно. Сохраняй живой человеческий язык и избегай канцелярита.\n"
-            "Примеры ответов пользователя:\n"
-            f"{style.examples[:2400]}"
+            f"Типичные термины и контекст: {terms or 'без явных доменных слов'}.\n"
+            f"Частые темы: {topics or 'без устойчивых тем'}.\n"
+            f"Свежие примеры, на которые полезно ориентироваться:\n"
+            f"{priority_block or '- пока нет подтверждённых примеров'}\n"
+            "Не копируй примеры дословно. Сохраняй живой человеческий язык, краткость и смысл."
         )
 
     def _promote_priority_examples(self, style_id: int, examples: list[str]) -> None:
@@ -235,7 +302,41 @@ class StyleManager:
         ]
         if priority_examples:
             merged["priority_examples"] = StyleManager._dedupe_examples(priority_examples)[:8]
+        existing_domain_terms = [
+            str(item).strip()
+            for item in existing_profile.get("domain_terms", [])
+            if str(item).strip()
+        ]
+        if existing_domain_terms:
+            current_domain_terms = [
+                str(item).strip()
+                for item in merged.get("domain_terms", [])
+                if str(item).strip()
+            ]
+            merged["domain_terms"] = StyleManager._dedupe_terms([*current_domain_terms, *existing_domain_terms])[:40]
+        existing_topic_hints = existing_profile.get("topic_hints", [])
+        if existing_topic_hints:
+            merged["topic_hints"] = StyleManager._normalize_topic_hints(existing_topic_hints)
         return merged
+
+    @staticmethod
+    def _short_example(text: str, max_chars: int) -> str:
+        clean = " ".join(text.split()).strip()
+        if len(clean) <= max_chars:
+            return clean
+        truncated = clean[:max_chars].rsplit(" ", 1)[0].strip()
+        return (truncated or clean[:max_chars]).strip() + "..."
+
+    @staticmethod
+    def _short_terms(raw_terms: Any, limit: int) -> str:
+        if not isinstance(raw_terms, (list, tuple)):
+            return ""
+        terms = [
+            str(term).strip()
+            for term in raw_terms
+            if str(term).strip()
+        ]
+        return ", ".join(terms[:limit])
 
     @staticmethod
     def _dedupe_examples(examples: list[str]) -> list[str]:
@@ -251,10 +352,20 @@ class StyleManager:
         return result
 
     def _profile_with_domain_terms(self, examples: str, profile: dict[str, Any]) -> dict[str, Any]:
-        if "domain_terms" in profile:
-            return profile
+        profile = dict(profile)
+        if "domain_terms" not in profile:
+            words = re.findall(r"[\wёЁ-]+", examples, re.UNICODE)
+            profile["domain_terms"] = self._extract_domain_terms(words)[:30]
+        if "topic_hints" not in profile:
+            profile["topic_hints"] = []
         words = re.findall(r"[\wёЁ-]+", examples, re.UNICODE)
-        profile["domain_terms"] = self._extract_domain_terms(words)[:30]
+        profile["domain_terms"] = self._dedupe_terms(
+            [
+                *[str(item).strip() for item in profile.get("domain_terms", []) if str(item).strip()],
+                *self._extract_domain_terms(words)[:12],
+            ]
+        )[:40]
+        profile["topic_hints"] = self._normalize_topic_hints(profile.get("topic_hints", []))
         return profile
 
     @staticmethod
@@ -298,3 +409,101 @@ class StyleManager:
             counts[clean] = counts.get(clean, 0) + 1
         ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
         return [word for word, _ in ranked]
+
+    @staticmethod
+    def _dedupe_terms(terms: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for term in terms:
+            clean = str(term).strip().lower()
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            result.append(clean)
+        return result
+
+    def _extract_context_markers(self, customer_text: str, final_response: str) -> list[str]:
+        customer_words = re.findall(r"[\wёЁ-]+", customer_text, re.UNICODE)
+        response_words = re.findall(r"[\wёЁ-]+", final_response, re.UNICODE)
+        customer_terms = self._extract_domain_terms(customer_words)[:10]
+        response_terms = self._extract_domain_terms(response_words)[:6]
+        phrases = self._extract_context_phrases(customer_text)[:8]
+        return self._dedupe_terms([*phrases, *customer_terms, *response_terms])[:16]
+
+    @staticmethod
+    def _extract_context_phrases(text: str) -> list[str]:
+        tokens = [token.lower() for token in re.findall(r"[\wёЁ-]+", text, re.UNICODE)]
+        phrases: list[str] = []
+        for index in range(len(tokens) - 1):
+            left = tokens[index].strip("-_")
+            right = tokens[index + 1].strip("-_")
+            if len(left) < 4 or len(right) < 4:
+                continue
+            phrases.append(f"{left} {right}")
+        return StyleManager._dedupe_terms(phrases)
+
+    @staticmethod
+    def _normalize_topic_hints(raw_hints: Any) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        if not isinstance(raw_hints, list):
+            return normalized
+        for item in raw_hints:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            markers = [
+                str(marker).strip().lower()
+                for marker in item.get("markers", [])
+                if str(marker).strip()
+            ]
+            examples = [
+                str(example).strip()
+                for example in item.get("examples", [])
+                if str(example).strip()
+            ]
+            try:
+                hits = int(item.get("hits", 1) or 1)
+            except Exception:
+                hits = 1
+            normalized.append(
+                {
+                    "name": name,
+                    "markers": StyleManager._dedupe_terms(markers)[:12],
+                    "examples": StyleManager._dedupe_examples(examples)[:4],
+                    "hits": max(hits, 1),
+                }
+            )
+        return normalized
+
+    def _merge_topic_hints(
+        self,
+        existing_hints: Any,
+        topic: str,
+        markers: list[str],
+        customer_text: str,
+    ) -> list[dict[str, Any]]:
+        hints = self._normalize_topic_hints(existing_hints)
+        example = customer_text.strip()
+        merged = False
+        for hint in hints:
+            if str(hint.get("name", "")).strip().lower() != topic.strip().lower():
+                continue
+            hint["markers"] = self._dedupe_terms([*markers, *hint.get("markers", [])])[:12]
+            if example:
+                hint["examples"] = self._dedupe_examples([example, *hint.get("examples", [])])[:4]
+            hint["hits"] = int(hint.get("hits", 1) or 1) + 1
+            merged = True
+            break
+        if not merged:
+            hints.append(
+                {
+                    "name": topic,
+                    "markers": self._dedupe_terms(markers)[:12],
+                    "examples": [example] if example else [],
+                    "hits": 1,
+                }
+            )
+        hints.sort(key=lambda item: (-int(item.get("hits", 1)), str(item.get("name", "")).lower()))
+        return hints[:24]

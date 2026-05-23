@@ -28,12 +28,12 @@ QLabel#Subtle, QLabel#Hint {
     color: #9AA4B2;
 }
 QLabel#StatusPill {
-    background: #17251D;
-    border: 1px solid #294A35;
-    border-radius: 9px;
+    background: #17231C;
+    border: 1px solid #2A4434;
+    border-radius: 8px;
     color: #D9F7E6;
     font-weight: 600;
-    padding: 5px 10px;
+    padding: 4px 9px;
 }
 QLabel#StatusPill[ok="false"] {
     background: #2B2116;
@@ -44,6 +44,36 @@ QFrame#Panel {
     background: #181C24;
     border: 1px solid #2A303C;
     border-radius: 8px;
+}
+QLabel#PanelTitle {
+    color: #F2F5FA;
+    font-weight: 700;
+}
+QFrame#InsightPanel {
+    background: #151A22;
+    border: 1px solid #273142;
+    border-radius: 7px;
+}
+QLabel#InsightTopic {
+    color: #F4F7FA;
+    font-weight: 700;
+}
+QLabel#InsightSource {
+    color: #9AA4B2;
+    background: #101722;
+    border: 1px solid #293447;
+    border-radius: 10px;
+    padding: 3px 8px;
+}
+QLabel#InsightChip {
+    color: #CFE0F8;
+    background: #1B2534;
+    border: 1px solid #334157;
+    border-radius: 10px;
+    padding: 3px 8px;
+}
+QLabel#InsightDetails {
+    color: #9AA4B2;
 }
 QFrame#DropZone {
     background: #151922;
@@ -74,6 +104,15 @@ QPushButton#Primary {
 QPushButton#Primary:hover {
     background: #438BFF;
 }
+QPushButton#Secondary {
+    background: #1D2634;
+    color: #EAF1FF;
+    border-color: #35445C;
+}
+QPushButton#Secondary:hover {
+    background: #253149;
+    border-color: #466087;
+}
 QPushButton#Danger {
     background: #392129;
     border-color: #61313F;
@@ -86,6 +125,16 @@ QPushButton#Ghost {
 }
 QPushButton#Ghost:hover {
     background: #232C3B;
+}
+QPushButton#Tiny {
+    background: #171E29;
+    color: #CCD6E5;
+    border: 1px solid #2E394B;
+    border-radius: 6px;
+    padding: 5px 9px;
+}
+QPushButton#Tiny:hover {
+    background: #202938;
 }
 QToolButton {
     background: #242B36;
@@ -172,12 +221,12 @@ QLabel#Subtle, QLabel#Hint {
     color: #687386;
 }
 QLabel#StatusPill {
-    background: #F1F8F4;
-    border: 1px solid #CFE8D8;
-    border-radius: 9px;
+    background: #F3F9F6;
+    border: 1px solid #D6E9DE;
+    border-radius: 8px;
     color: #234235;
     font-weight: 600;
-    padding: 5px 10px;
+    padding: 4px 9px;
 }
 QLabel#StatusPill[ok="false"] {
     background: #FFF7EC;
@@ -188,6 +237,36 @@ QFrame#Panel {
     background: #FFFFFF;
     border: 1px solid #DCE3EE;
     border-radius: 8px;
+}
+QLabel#PanelTitle {
+    color: #172033;
+    font-weight: 700;
+}
+QFrame#InsightPanel {
+    background: #F8FAFD;
+    border: 1px solid #D9E2EF;
+    border-radius: 7px;
+}
+QLabel#InsightTopic {
+    color: #172033;
+    font-weight: 700;
+}
+QLabel#InsightSource {
+    color: #627089;
+    background: #FFFFFF;
+    border: 1px solid #DCE4F0;
+    border-radius: 10px;
+    padding: 3px 8px;
+}
+QLabel#InsightChip {
+    color: #2D476D;
+    background: #EEF5FF;
+    border: 1px solid #D4E3F8;
+    border-radius: 10px;
+    padding: 3px 8px;
+}
+QLabel#InsightDetails {
+    color: #687386;
 }
 QFrame#DropZone {
     background: #F8FAFD;
@@ -219,6 +298,15 @@ QPushButton#Primary {
 QPushButton#Primary:hover {
     background: #438BFF;
 }
+QPushButton#Secondary {
+    background: #FFFFFF;
+    color: #23405F;
+    border-color: #C8D6EA;
+}
+QPushButton#Secondary:hover {
+    background: #EFF5FC;
+    border-color: #AFC5E4;
+}
 QPushButton#Danger {
     background: #FFF0F2;
     color: #9D2336;
@@ -232,6 +320,16 @@ QPushButton#Ghost {
 }
 QPushButton#Ghost:hover {
     background: #EDF2F8;
+}
+QPushButton#Tiny {
+    background: #F9FBFE;
+    color: #3A4A61;
+    border: 1px solid #DCE4F0;
+    border-radius: 6px;
+    padding: 5px 9px;
+}
+QPushButton#Tiny:hover {
+    background: #EEF4FB;
 }
 QToolButton {
     background: #EEF2F7;

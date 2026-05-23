@@ -93,13 +93,15 @@ class AIManager:
         if not model:
             raise ValueError("Не выбрана локальная модель Ollama.")
         prompt = self._build_prompt(customer_text, ocr_text, style_prompt, quality_rules)
+        use_image = self._should_attach_image(image_base64, ocr_text)
+        num_predict = self._estimate_num_predict(customer_text, ocr_text, use_image)
         payload: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
             "stream": False,
             "options": {
                 "temperature": self.settings.values.temperature,
-                "num_predict": self.settings.values.max_tokens,
+                "num_predict": num_predict,
             },
         }
         device = getattr(self.settings.values, "generation_device", "auto")
@@ -107,7 +109,7 @@ class AIManager:
             payload["options"]["num_gpu"] = 0
         elif device == "gpu":
             payload["options"]["num_gpu"] = 999
-        if image_base64:
+        if use_image and image_base64:
             payload["images"] = [image_base64]
         response = self.session.post(f"{self.base_url}/api/generate", json=payload, timeout=180)
         response.raise_for_status()
@@ -151,25 +153,62 @@ class AIManager:
 
     @staticmethod
     def _build_prompt(customer_text: str, ocr_text: str, style_prompt: str, quality_rules: str) -> str:
+        customer_block = AIManager._normalize_context_text(customer_text, 650) or "[нет текста клиента]"
+        ocr_block = AIManager._normalize_context_text(ocr_text, 750)
+        if ocr_block and customer_block != "[нет текста клиента]" and ocr_block.lower() == customer_block.lower():
+            ocr_block = ""
+
+        rules_block = AIManager._compact_rules_block(quality_rules)
         return (
-            "Ты локальный помощник сотрудника поддержки. Никаких внешних API, никаких упоминаний AI.\n"
-            "Задача: по сообщению и/или тексту со скриншота написать один готовый ответ.\n\n"
-            "Правила ответа:\n"
-            "- пиши естественно, как живой сотрудник;\n"
-            "- не используй чрезмерно официальные обращения;\n"
-            "- не добавляй выдуманные факты;\n"
-            "- если данных не хватает, задай короткий уточняющий вопрос;\n"
-            "- не объясняй свои рассуждения, верни только текст ответа;\n"
-            "- сохраняй спокойный дружелюбный тон;\n"
-            "- даже если пользователь пишет резко, грубо или агрессивно, не зеркаль этот тон;\n"
-            "- не используй сленг, насмешку, пассивную агрессию, хамство, сарказм и фразы вроде «досвидос», «мне неинтересно», «отвали»;\n"
-            "- если пользователь хочет прекратить диалог, сформулируй это нейтрально и уважительно.\n\n"
+            "Ты пишешь ответ клиенту от лица живого сотрудника поддержки.\n"
+            "Пиши спокойно, по-человечески и по сути. Не упоминай ИИ, шаблоны или внутренние правила.\n"
+            "Если данных мало, не выдумывай детали и не обещай то, чего нет в сообщении.\n\n"
             f"{style_prompt}\n\n"
-            "Локальные правила качества, собранные из прошлых исправлений:\n"
-            f"{quality_rules or '- пока нет накопленных правил'}\n\n"
-            "Сообщение, вставленное пользователем:\n"
-            f"{customer_text.strip() or '[нет текстового сообщения]'}\n\n"
-            "Текст, распознанный со скриншота:\n"
-            f"{ocr_text.strip() or '[OCR-текст отсутствует]'}\n\n"
-            "Сформируй финальный ответ:"
+            "Уточнения по качеству ответа:\n"
+            f"{rules_block}\n\n"
+            "Сообщение клиента:\n"
+            f"{customer_block}\n\n"
+            "OCR-контекст:\n"
+            f"{ocr_block or '[нет OCR-контекста]'}\n\n"
+            "Готовый ответ:"
         )
+
+    @staticmethod
+    def _should_attach_image(image_base64: str | None, ocr_text: str) -> bool:
+        if not image_base64:
+            return False
+        normalized_ocr = AIManager._normalize_context_text(ocr_text, 1200)
+        return len(normalized_ocr) < 120
+
+    def _estimate_num_predict(self, customer_text: str, ocr_text: str, has_image: bool) -> int:
+        configured_max = max(int(self.settings.values.max_tokens or 0), 120)
+        total_chars = len(customer_text.strip()) + len(ocr_text.strip())
+
+        if has_image:
+            limit = 420
+        elif total_chars <= 180:
+            limit = 180
+        elif total_chars <= 500:
+            limit = 260
+        elif total_chars <= 1200:
+            limit = 340
+        else:
+            limit = 420
+        return min(configured_max, limit)
+
+    @staticmethod
+    def _normalize_context_text(text: str, max_chars: int) -> str:
+        cleaned = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        cleaned = cleaned.strip()
+        if len(cleaned) <= max_chars:
+            return cleaned
+        truncated = cleaned[:max_chars].rsplit(" ", 1)[0].strip()
+        return (truncated or cleaned[:max_chars]).strip() + "..."
+
+    @staticmethod
+    def _compact_rules_block(quality_rules: str) -> str:
+        lines = [line.strip() for line in quality_rules.splitlines() if line.strip()]
+        if not lines:
+            return "- Пиши ясно и без лишнего официоза."
+        return "\n".join(lines[:3])

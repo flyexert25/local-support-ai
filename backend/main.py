@@ -9,6 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from app.core.case_analyzer import CaseAnalyzer
+from app.core.knowledge_service import KnowledgeService
 from app.core.learning_manager import LearningManager
 from app.core.settings_manager import SettingsManager
 from app.storage.database import Database
@@ -21,6 +22,7 @@ database = Database(settings.database_path)
 style_manager = StyleManager(database)
 learning_manager = LearningManager(database)
 case_analyzer = CaseAnalyzer()
+knowledge_service = KnowledgeService(PROJECT_ROOT)
 
 
 class EchoRequest(BaseModel):
@@ -49,6 +51,8 @@ class GeneratePreviewResponse(BaseModel):
     signals: list[str]
     extracted: dict[str, list[str]]
     quality_rules: list[str]
+    knowledge_articles: list[str]
+    knowledge_facts: list[str]
     draft_reply: str
 
 
@@ -63,6 +67,7 @@ def status():
         "app": "Local Support AI backend",
         "status": "ok",
         "mode": "learning",
+        "knowledge": knowledge_service.status(),
     }
 
 
@@ -103,12 +108,24 @@ def generate_preview(data: GeneratePreviewRequest):
         data.ocr_text or "",
         style_profile=style.profile if style else None,
     )
+    knowledge_matches = knowledge_service.search(
+        customer_text=data.customer_text,
+        ocr_text=data.ocr_text or "",
+        topic=analysis.topic,
+        limit=2,
+    )
     quality_rules_raw = learning_manager.build_quality_rules(style.profile if style else None)
     quality_rules = [
         line.lstrip("- ").strip()
         for line in quality_rules_raw.splitlines()
         if line.strip()
     ]
+    knowledge_titles = [match.title for match in knowledge_matches]
+    knowledge_facts: list[str] = []
+    for match in knowledge_matches:
+        for fact in match.facts:
+            if fact and fact not in knowledge_facts:
+                knowledge_facts.append(fact)
 
     return GeneratePreviewResponse(
         customer_text=data.customer_text,
@@ -120,7 +137,13 @@ def generate_preview(data: GeneratePreviewRequest):
         signals=analysis.signals,
         extracted=analysis.extracted,
         quality_rules=quality_rules,
-        draft_reply=_build_draft_reply(analysis, style.profile if style else None),
+        knowledge_articles=knowledge_titles,
+        knowledge_facts=knowledge_facts[:2],
+        draft_reply=_build_draft_reply(
+            analysis,
+            style.profile if style else None,
+            knowledge_facts=knowledge_facts[:2],
+        ),
     )
 
 
@@ -135,10 +158,15 @@ def _resolve_style(style_name: str | None):
     return default_style
 
 
-def _build_draft_reply(analysis, style_profile: dict | None) -> str:
+def _build_draft_reply(
+    analysis,
+    style_profile: dict | None,
+    knowledge_facts: list[str] | None = None,
+) -> str:
     style_profile = style_profile or {}
     tone = str(style_profile.get("tone", "дружелюбный"))
     short = float(style_profile.get("avg_sentence_words", 12) or 12) <= 10
+    knowledge_facts = knowledge_facts or []
 
     if tone == "формальный":
         opening = "Понимаю ваш вопрос."
@@ -151,6 +179,11 @@ def _build_draft_reply(analysis, style_profile: dict | None) -> str:
         "Проценты / кредит наличными": "Проверю, почему начислились проценты по кредиту наличными, и поясню, как это связано с графиком и условиями договора.",
         "Проценты / кредитная карта": "Проверю, почему произошло списание процентов, и коротко поясню логику расчета.",
         "Проценты / кредит": "Проверю, почему появились проценты по кредиту, и поясню, какие условия и даты на это повлияли.",
+        "Дебетовая карта / кэшбэк": "Проверю условия по дебетовой карте и поясню, как в вашем случае работают категории и начисление кэшбэка.",
+        "Дебетовая карта / переводы и лимиты": "Проверю правила по дебетовой карте и подскажу, как в вашем случае работают переводы, лимиты или комиссии.",
+        "Вклад / проценты": "Проверю условия вклада и поясню, как считаются проценты и от чего зависит итоговый доход.",
+        "Вклад / пополнение и закрытие": "Проверю правила по вкладу и поясню, как здесь работают пополнение, досрочное закрытие или снятие средств.",
+        "Накопительный счет / проценты": "Проверю условия по накопительному счету и поясню, как ставка и остаток влияют на начисление процентов.",
         "Арест / блокировка счетов": "Посмотрю, как именно отображается блокировка, и объясню, что это означает по вашим счетам.",
         "Возврат / отмена покупки": "Уточню статус возврата и подскажу, на каком этапе сейчас находится операция.",
         "Премиум / подписка": "Проверю условия сервиса и поясню, откуда появилось списание или изменение условий.",
@@ -171,7 +204,12 @@ def _build_draft_reply(analysis, style_profile: dict | None) -> str:
     elif "нужна проверка начислений" in analysis.signals:
         follow_up = " Отдельно проверю расчеты и начисления."
 
-    draft = f"{opening} {body}{follow_up}".strip()
+    facts_part = ""
+    if knowledge_facts:
+        selected = knowledge_facts[:1] if short else knowledge_facts[:2]
+        facts_part = " По правилам продукта: " + " ".join(selected)
+
+    draft = f"{opening} {body}{follow_up}{facts_part}".strip()
     if short:
         draft = draft.replace("Давайте быстро разберемся. ", "")
     return " ".join(draft.split())

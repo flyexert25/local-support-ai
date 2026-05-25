@@ -43,6 +43,8 @@ class GenerateWorker(QObject):
         quality_rules: str,
         model: str,
         image_base64: str | None,
+        topic_hint: str | None = None,
+        knowledge_facts: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.ai_manager = ai_manager
@@ -52,6 +54,8 @@ class GenerateWorker(QObject):
         self.quality_rules = quality_rules
         self.model = model
         self.image_base64 = image_base64
+        self.topic_hint = topic_hint
+        self.knowledge_facts = knowledge_facts or []
 
     def run(self) -> None:
         try:
@@ -63,6 +67,8 @@ class GenerateWorker(QObject):
                 quality_rules=self.quality_rules,
                 model=self.model,
                 image_base64=self.image_base64,
+                topic_hint=self.topic_hint,
+                knowledge_facts=self.knowledge_facts,
             )
             elapsed_ms = (perf_counter() - started_at) * 1000
             self.finished.emit(reply, elapsed_ms)

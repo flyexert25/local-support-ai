@@ -62,14 +62,14 @@ QLabel#InsightSource {
     color: #9AA4B2;
     background: #101722;
     border: 1px solid #293447;
-    border-radius: 10px;
+    border-radius: 8px;
     padding: 3px 8px;
 }
 QLabel#InsightChip {
     color: #CFE0F8;
     background: #1B2534;
     border: 1px solid #334157;
-    border-radius: 10px;
+    border-radius: 8px;
     padding: 3px 8px;
 }
 QLabel#InsightDetails {
@@ -255,14 +255,14 @@ QLabel#InsightSource {
     color: #627089;
     background: #FFFFFF;
     border: 1px solid #DCE4F0;
-    border-radius: 10px;
+    border-radius: 8px;
     padding: 3px 8px;
 }
 QLabel#InsightChip {
     color: #2D476D;
     background: #EEF5FF;
     border: 1px solid #D4E3F8;
-    border-radius: 10px;
+    border-radius: 8px;
     padding: 3px 8px;
 }
 QLabel#InsightDetails {

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, pyqtProperty, pyqtSignal
 from PyQt6.QtGui import QColor, QDragEnterEvent, QDropEvent, QPainter, QPixmap
-from PyQt6.QtWidgets import QAbstractButton, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QAbstractButton, QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from app.utils.image_utils import SUPPORTED_IMAGE_EXTENSIONS
 
@@ -102,24 +102,29 @@ class CaseInsightPanel(QFrame):
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("InsightPanel")
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
 
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(8)
+        top_row.setSpacing(6)
 
         self.topic_label = QLabel("Предмет не определён")
         self.topic_label.setObjectName("InsightTopic")
         self.source_label = QLabel("Локально")
         self.source_label.setObjectName("InsightSource")
+        self.source_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.source_label.setMinimumHeight(24)
+        self.source_label.setMinimumWidth(92)
         top_row.addWidget(self.topic_label, 1)
         top_row.addWidget(self.source_label)
         layout.addLayout(top_row)
 
         self.signals_widget = QWidget()
+        self.signals_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self.signals_layout = QHBoxLayout(self.signals_widget)
         self.signals_layout.setContentsMargins(0, 0, 0, 0)
         self.signals_layout.setSpacing(6)
@@ -129,6 +134,7 @@ class CaseInsightPanel(QFrame):
         self.details_label.setObjectName("InsightDetails")
         self.details_label.setWordWrap(True)
         layout.addWidget(self.details_label)
+        layout.addStretch(0)
         self.set_placeholder()
 
     def set_placeholder(self, text: str = "Признаки появятся после ввода текста или OCR.") -> None:
@@ -136,6 +142,7 @@ class CaseInsightPanel(QFrame):
         self.source_label.setText("Ожидание")
         self._set_chips([])
         self.details_label.setText(text)
+        self.details_label.setVisible(True)
 
     def set_analysis(
         self,
@@ -146,7 +153,8 @@ class CaseInsightPanel(QFrame):
     ) -> None:
         self.topic_label.setText(topic or "Предмет не определён")
         self.source_label.setText(source)
-        self._set_chips(signals[:4])
+        visible_signals = signals[:4]
+        self._set_chips(visible_signals)
 
         details: list[str] = []
         if extracted.get("amounts"):
@@ -155,7 +163,14 @@ class CaseInsightPanel(QFrame):
             details.append("Даты: " + ", ".join(extracted["dates"][:3]))
         if extracted.get("mcc_codes"):
             details.append("MCC: " + ", ".join(extracted["mcc_codes"][:4]))
-        self.details_label.setText(" · ".join(details) if details else "Явных деталей пока нет.")
+        if details:
+            details_text = " · ".join(details)
+        elif visible_signals:
+            details_text = ""
+        else:
+            details_text = "Явных признаков пока нет."
+        self.details_label.setText(details_text)
+        self.details_label.setVisible(bool(details_text))
 
     def _set_chips(self, values: list[str]) -> None:
         while self.signals_layout.count():
@@ -163,11 +178,10 @@ class CaseInsightPanel(QFrame):
             widget = item.widget()
             if widget:
                 widget.deleteLater()
-        if not values:
-            values = ["явных признаков пока нет"]
         for value in values:
             chip = QLabel(value)
             chip.setObjectName("InsightChip")
+            chip.setMinimumHeight(24)
             self.signals_layout.addWidget(chip)
         self.signals_layout.addStretch(1)
 

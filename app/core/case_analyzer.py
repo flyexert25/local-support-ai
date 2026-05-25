@@ -56,9 +56,65 @@ class CaseAnalyzer:
         "минимальный платёж",
     )
 
+    DEBIT_CARD_MARKERS: tuple[str, ...] = (
+        "дебетовая карта",
+        "дебетовка",
+        "дебетке",
+        "дебетовой карте",
+        "по дебетовой карте",
+    )
+
+    DEPOSIT_MARKERS: tuple[str, ...] = (
+        "вклад",
+        "вкладу",
+        "вклада",
+        "депозит",
+        "досрочн",
+        "пополн",
+        "капитализац",
+    )
+
+    SAVINGS_ACCOUNT_MARKERS: tuple[str, ...] = (
+        "накопительный счет",
+        "накопительный счёт",
+        "накопсчет",
+        "накопительный",
+        "накопительн",
+        "счету",
+        "счёту",
+        "остаток на счете",
+        "остаток на счёте",
+    )
+
+    CASHBACK_MARKERS: tuple[str, ...] = (
+        "кэшб",
+        "cashback",
+        "категори",
+        "повышенн",
+        "бонус",
+    )
+
+    GENERIC_STYLE_TERMS: tuple[str, ...] = (
+        "проценты",
+        "процент",
+        "кредит",
+        "карта",
+        "счет",
+        "счёт",
+        "вклад",
+        "кэшбэк",
+        "платеж",
+        "платёж",
+    )
+
     TOPIC_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("Проценты / кредит наличными", ("кредит наличными", "по кредиту наличными", "потребительский кредит", "график платеж", "ежемесячный платеж", "ежемесячный платёж")),
         ("Проценты / кредитная карта", ("кредитная карта", "кредитке", "кредиткой", "льготн", "выписк", "платежный период", "платёжный период", "минимальный платеж", "минимальный платёж")),
+        ("Дебетовая карта / кэшбэк", ("дебетовая карта", "дебетовка", "дебетовой карте", "кэшб", "cashback", "категори", "повышенн", "бонус")),
+        ("Дебетовая карта / переводы и лимиты", ("дебетовая карта", "дебетовка", "перевод", "лимит", "снятие", "наличные", "комисси")),
+        ("Вклад / проценты", ("вклад", "вкладу", "вклада", "депозит", "ставк", "процент", "капитализац")),
+        ("Вклад / пополнение и закрытие", ("вклад", "пополн", "закрыт", "досрочн", "снять", "снятие")),
+        ("Накопительный счет / проценты", ("накопительный счет", "накопительный счёт", "накопительный", "остаток", "процент", "ставк")),
         ("Арест / блокировка счетов", ("арест", "блокиров", "взыск", "долг", "пристав", "исполнительн")),
         ("Возврат / отмена покупки", ("возврат", "отмен", "вернут", "верн", "магазин", "продавец")),
         ("Премиум / подписка", ("премиум", "premium", "обслуживан", "2990", "2 990", "подписк")),
@@ -95,6 +151,10 @@ class CaseAnalyzer:
     def _detect_topic(self, lowered: str, style_profile: dict[str, Any] | None = None) -> str:
         has_interest = any(marker in lowered for marker in self.INTEREST_MARKERS)
         product = self._detect_credit_product(lowered)
+        is_debit = any(marker in lowered for marker in self.DEBIT_CARD_MARKERS)
+        is_deposit = any(marker in lowered for marker in self.DEPOSIT_MARKERS)
+        is_savings = any(marker in lowered for marker in self.SAVINGS_ACCOUNT_MARKERS)
+        has_cashback = any(marker in lowered for marker in self.CASHBACK_MARKERS)
 
         if has_interest and product == "cash_loan":
             return "Проценты / кредит наличными"
@@ -104,6 +164,15 @@ class CaseAnalyzer:
 
         if has_interest and "кредит" in lowered:
             return "Проценты / кредит"
+
+        if is_debit and has_cashback:
+            return "Дебетовая карта / кэшбэк"
+
+        if is_savings and (has_interest or "ставк" in lowered or "остаток" in lowered):
+            return "Накопительный счет / проценты"
+
+        if is_deposit and (has_interest or "ставк" in lowered):
+            return "Вклад / проценты"
 
         topic_scores: dict[str, int] = {}
         for topic, markers in self.TOPIC_RULES:
@@ -156,6 +225,8 @@ class CaseAnalyzer:
         if not matches:
             return "Общее обращение"
         best = sorted(matches, key=len, reverse=True)[0]
+        if best in self.GENERIC_STYLE_TERMS:
+            return "Общее обращение"
         return f"Тема из стиля: {best}"
 
     def _score_style_topics(self, lowered: str, style_profile: dict[str, Any]) -> dict[str, int]:

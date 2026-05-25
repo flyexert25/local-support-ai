@@ -21,6 +21,19 @@ class AnalyticsRepository:
         value = row["value"] if row else None
         return int(value or 0)
 
+    def average_stage_ms(self, column: str) -> int:
+        allowed = {"ocr_ms", "analyze_ms", "preview_ms", "generation_ms"}
+        if column not in allowed:
+            raise ValueError(f"Unsupported stage column: {column}")
+        row = self.database.fetch_one(
+            f"""
+            SELECT AVG(NULLIF({column}, 0)) AS value
+            FROM conversations
+            """
+        )
+        value = row["value"] if row else None
+        return int(value or 0)
+
     def slowest_generation_ms(self) -> int:
         row = self.database.fetch_one("SELECT MAX(generation_ms) AS value FROM conversations")
         value = row["value"] if row else None

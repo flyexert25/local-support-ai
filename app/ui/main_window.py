@@ -33,7 +33,7 @@ from app.styles.style_manager import StyleManager
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.theme import apply_theme
 from app.ui.widgets import CaseInsightPanel, ScreenshotDropZone, StatusPill
-from app.ui.workers import BackendAnalyzeWorker, GenerateWorker, OCRWorker, start_worker
+from app.ui.workers import BackendAnalyzeWorker, BackendPreviewWorker, GenerateWorker, OCRWorker, start_worker
 from app.utils.image_utils import image_path_to_base64, load_pixmap, qimage_to_base64, qimage_to_png_bytes
 
 
@@ -61,6 +61,14 @@ class MainWindow(QMainWindow):
         self.last_generated_raw_response: str = ""
         self.last_generated_model: str = ""
         self.last_generated_style_id: int | None = None
+        self.last_case_analysis: CaseAnalysis | None = None
+        self.last_case_source: str = "Ожидание"
+        self.stage_metrics: dict[str, float | None] = {
+            "ocr_ms": None,
+            "analyze_ms": None,
+            "preview_ms": None,
+            "generate_ms": None,
+        }
         self._busy = False
         self.threads = []
         self.workers = []
@@ -95,6 +103,11 @@ class MainWindow(QMainWindow):
         self.status_message.setObjectName("Subtle")
         self.status_message.setContentsMargins(16, 8, 16, 8)
         outer.addWidget(self.status_message)
+        self.sla_message = QLabel()
+        self.sla_message.setObjectName("Subtle")
+        self.sla_message.setContentsMargins(16, 0, 16, 8)
+        outer.addWidget(self.sla_message)
+        self._update_sla_message()
         self.setCentralWidget(root)
 
     def _build_top_bar(self) -> QWidget:
@@ -150,10 +163,27 @@ class MainWindow(QMainWindow):
         self.case_summary = CaseInsightPanel()
         layout.addWidget(self._wrap_panel("Аналитика обращения", self.case_summary), 0)
 
+        self.topic_override_combo = QComboBox()
+        self.topic_override_combo.addItems(self._available_topics())
+        self.topic_override_combo.setEnabled(False)
+        self.topic_override_save_button = QPushButton("Сохранить тему")
+        self.topic_override_save_button.setObjectName("Tiny")
+        self.topic_override_save_button.setEnabled(False)
+        self.topic_override_save_button.clicked.connect(self.save_topic_correction)
+        topic_override_body = QWidget()
+        topic_override_layout = QHBoxLayout(topic_override_body)
+        topic_override_layout.setContentsMargins(0, 0, 0, 0)
+        topic_override_layout.setSpacing(8)
+        topic_override_layout.addWidget(self.topic_override_combo, 1)
+        topic_override_layout.addWidget(self.topic_override_save_button)
+        self.topic_override_panel = self._wrap_panel("Коррекция темы", topic_override_body)
+        self.topic_override_panel.setVisible(False)
+        layout.addWidget(self.topic_override_panel, 0)
+
         buttons = QGridLayout()
         self.load_button = QPushButton("Загрузить скриншот")
         self.load_button.clicked.connect(self.open_image_dialog)
-        self.analyze_button = QPushButton("Анализировать")
+        self.analyze_button = QPushButton("Подготовить ответ")
         self.analyze_button.setObjectName("Secondary")
         self.analyze_button.clicked.connect(self.analyze_screenshot)
         self.clear_button = QPushButton("Очистить")
@@ -214,6 +244,10 @@ class MainWindow(QMainWindow):
         self._set_response_feedback_enabled(False)
 
         buttons = QHBoxLayout()
+        self.preview_button = QPushButton("Быстрый черновик")
+        self.preview_button.setObjectName("Secondary")
+        self.preview_button.clicked.connect(self.generate_preview)
+        self.preview_button.setVisible(False)
         self.generate_button = QPushButton("Сгенерировать ответ")
         self.generate_button.setObjectName("Primary")
         self.generate_button.clicked.connect(self.generate_reply)
@@ -222,6 +256,7 @@ class MainWindow(QMainWindow):
         self.copy_button = QPushButton("Копировать")
         self.copy_button.clicked.connect(self.copy_reply)
         buttons.addStretch(1)
+        buttons.addWidget(self.preview_button)
         buttons.addWidget(self.generate_button)
         buttons.addWidget(self.save_to_style_button)
         buttons.addWidget(self.copy_button)
@@ -248,6 +283,64 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+K"), self, activated=self.clear_all)
         QShortcut(QKeySequence("Ctrl+Shift+C"), self, activated=self.copy_reply)
         QShortcut(QKeySequence("Ctrl+,"), self, activated=self.open_settings)
+
+    def _available_topics(self) -> list[str]:
+        topics = [
+            "Общее обращение",
+            "Проценты / кредит наличными",
+            "Проценты / кредитная карта",
+            "Проценты / кредит",
+        ]
+        topics.extend(topic for topic, _ in self.case_analyzer.TOPIC_RULES)
+        seen: set[str] = set()
+        result: list[str] = []
+        for topic in topics:
+            clean = topic.strip()
+            key = clean.lower()
+            if not clean or key in seen:
+                continue
+            seen.add(key)
+            result.append(clean)
+        return result
+
+    def _set_stage_metric(self, key: str, elapsed_ms: float | None) -> None:
+        if key not in self.stage_metrics:
+            return
+        self.stage_metrics[key] = elapsed_ms if elapsed_ms and elapsed_ms > 0 else None
+        self._update_sla_message()
+
+    def _reset_stage_metrics(self) -> None:
+        for key in self.stage_metrics:
+            self.stage_metrics[key] = None
+        self._update_sla_message()
+
+    def _update_sla_message(self) -> None:
+        if not any(self.stage_metrics.values()):
+            self.sla_message.clear()
+            return
+        parts = [
+            f"OCR {self._format_duration(self.stage_metrics['ocr_ms'])}",
+            f"Анализ {self._format_duration(self.stage_metrics['analyze_ms'])}",
+            f"Черновик {self._format_duration(self.stage_metrics['preview_ms'])}",
+            f"Генерация {self._format_duration(self.stage_metrics['generate_ms'])}",
+        ]
+        self.sla_message.setText("SLA: " + " · ".join(parts))
+
+    def _sync_topic_override_controls(self, topic: str | None = None) -> None:
+        has_analysis = self.last_case_analysis is not None
+        self.topic_override_panel.setVisible(has_analysis)
+        self.topic_override_combo.setEnabled(has_analysis and not self._busy)
+        self.topic_override_save_button.setEnabled(has_analysis and not self._busy)
+        if not has_analysis:
+            return
+        selected_topic = (topic or self.last_case_analysis.topic).strip()
+        if not selected_topic:
+            return
+        existing_index = self.topic_override_combo.findText(selected_topic)
+        if existing_index < 0:
+            self.topic_override_combo.addItem(selected_topic)
+            existing_index = self.topic_override_combo.findText(selected_topic)
+        self.topic_override_combo.setCurrentIndex(existing_index)
 
     def refresh_status(self) -> None:
         self.local_pill.set_state("Локальный режим", not self.settings.values.network_disabled)
@@ -312,8 +405,12 @@ class MainWindow(QMainWindow):
         self.last_generated_raw_response = ""
         self.last_generated_model = ""
         self.last_generated_style_id = None
+        self.last_case_analysis = None
+        self.last_case_source = "Ожидание"
+        self._reset_stage_metrics()
         self._set_ocr_feedback_enabled(False)
         self._set_response_feedback_enabled(False)
+        self._sync_topic_override_controls(None)
         self.drop_zone.set_pixmap(pixmap)
         self._set_status(f"Скриншот загружен: {path.name}")
         self._refresh_analyze_button_state()
@@ -327,9 +424,9 @@ class MainWindow(QMainWindow):
             self._set_busy(True)
             worker = OCRWorker(self.ocr_manager, self.current_image_path)
             worker.finished.connect(self._ocr_finished)
-            worker.failed.connect(self._worker_failed)
-            worker.finished.connect(lambda: self._forget_worker(worker))
-            worker.failed.connect(lambda _: self._forget_worker(worker))
+            worker.failed.connect(self._ocr_failed)
+            worker.finished.connect(lambda *_: self._forget_worker(worker))
+            worker.failed.connect(lambda *_: self._forget_worker(worker))
             self.workers.append(worker)
             self.threads.append(start_worker(worker))
             self._set_status("OCR распознает текст локально...")
@@ -360,18 +457,42 @@ class MainWindow(QMainWindow):
         )
         worker.finished.connect(self._backend_analysis_finished)
         worker.failed.connect(
-            lambda message, customer=customer_text, ocr=ocr_text, profile=style.profile if style else None: self._backend_analysis_failed(
+            lambda message, elapsed_ms, customer=customer_text, ocr=ocr_text, profile=style.profile if style else None: self._backend_analysis_failed(
                 message,
+                elapsed_ms,
                 customer,
                 ocr,
                 profile,
             )
         )
         worker.finished.connect(lambda *_: self._forget_worker(worker))
-        worker.failed.connect(lambda _: self._forget_worker(worker))
+        worker.failed.connect(lambda *_: self._forget_worker(worker))
         self.workers.append(worker)
         self.threads.append(start_worker(worker))
         self._set_status("FastAPI анализирует обращение...")
+
+    def generate_preview(self) -> None:
+        customer = self.customer_text.toPlainText().strip()
+        ocr = self.ocr_text.toPlainText().strip()
+        if not customer and not ocr:
+            QMessageBox.information(self, "Нет текста", "Для черновика нужен текст сообщения или OCR-контекст.")
+            return
+
+        style = self.style_manager.get_style(self.settings.values.selected_style_id)
+        self._set_busy(True)
+        worker = BackendPreviewWorker(
+            self.backend_client,
+            customer_text=customer,
+            ocr_text=ocr,
+            selected_style=style.name if style else None,
+        )
+        worker.finished.connect(self._preview_finished)
+        worker.failed.connect(self._preview_failed)
+        worker.finished.connect(lambda *_: self._forget_worker(worker))
+        worker.failed.connect(lambda *_: self._forget_worker(worker))
+        self.workers.append(worker)
+        self.threads.append(start_worker(worker))
+        self._set_status("FastAPI собирает быстрый черновик ответа...")
 
     def generate_reply(self) -> None:
         customer = self.customer_text.toPlainText().strip()
@@ -397,7 +518,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(lambda text, elapsed_ms: self._generation_finished(text, model, style_id, style_profile, elapsed_ms))
         worker.failed.connect(self._worker_failed)
         worker.finished.connect(lambda *_: self._forget_worker(worker))
-        worker.failed.connect(lambda _: self._forget_worker(worker))
+        worker.failed.connect(lambda *_: self._forget_worker(worker))
         self.workers.append(worker)
         self.threads.append(start_worker(worker))
         self._set_status("Локальная модель генерирует ответ...")
@@ -442,8 +563,12 @@ class MainWindow(QMainWindow):
         self.last_generated_raw_response = ""
         self.last_generated_model = ""
         self.last_generated_style_id = None
+        self.last_case_analysis = None
+        self.last_case_source = "Ожидание"
+        self._reset_stage_metrics()
         self._set_ocr_feedback_enabled(False)
         self._set_response_feedback_enabled(False)
+        self._sync_topic_override_controls(None)
         self.drop_zone.set_pixmap(None)
         self._set_status("Очищено")
         self._refresh_analyze_button_state()
@@ -477,45 +602,57 @@ class MainWindow(QMainWindow):
                 self.last_generated_raw_response = ""
                 self.last_generated_model = ""
                 self.last_generated_style_id = None
+                self.last_case_analysis = None
+                self.last_case_source = "Ожидание"
+                self._reset_stage_metrics()
                 self._set_ocr_feedback_enabled(False)
                 self._set_response_feedback_enabled(False)
+                self._sync_topic_override_controls(None)
                 self.drop_zone.set_pixmap(load_pixmap(temp_path))
                 self._set_status("Скриншот вставлен из буфера обмена")
                 self._refresh_analyze_button_state()
                 return
         super().keyPressEvent(event)
 
-    def _ocr_finished(self, text: str) -> None:
+    def _ocr_finished(self, text: str, elapsed_ms: float) -> None:
+        self._set_stage_metric("ocr_ms", elapsed_ms)
         self.last_ocr_raw_text = text or ""
         learned = self.learning_manager.apply_ocr_memory(text or "")
         self.ocr_text.setPlainText(learned.text)
         self._set_ocr_feedback_enabled(bool(text))
         if not text:
             self._set_busy(False)
-            self._set_status("OCR завершен, текст не найден")
+            self._set_status(f"OCR завершен, текст не найден · {self._format_duration(elapsed_ms)}")
         elif learned.replacements:
             preview = ", ".join(f"{source} -> {target}" for source, target in learned.replacements[:3])
-            self._set_status(f"OCR завершен · автокоррекция: {preview}")
+            self._set_status(f"OCR завершен · {self._format_duration(elapsed_ms)} · автокоррекция: {preview}")
             self._set_busy(False)
             self._run_backend_analysis(self.customer_text.toPlainText().strip(), learned.text)
         else:
-            self._set_status("OCR завершен")
+            self._set_status(f"OCR завершен · {self._format_duration(elapsed_ms)}")
             self._set_busy(False)
             self._run_backend_analysis(self.customer_text.toPlainText().strip(), learned.text)
 
-    def _backend_analysis_finished(self, payload: dict) -> None:
+    def _ocr_failed(self, message: str, elapsed_ms: float) -> None:
+        self._set_stage_metric("ocr_ms", elapsed_ms)
+        self._worker_failed(message)
+
+    def _backend_analysis_finished(self, payload: dict, elapsed_ms: float) -> None:
+        self._set_stage_metric("analyze_ms", elapsed_ms)
         self._show_analysis_payload(payload, "FastAPI")
-        topic = str(payload.get("topic", "Общее обращение"))
-        self._set_status(f"FastAPI анализ завершён · тема: {topic}")
+        self._set_status(f"Анализ готов · {self._format_duration(elapsed_ms)}. Собираю черновик ответа...")
         self._set_busy(False)
+        self.generate_preview()
 
     def _backend_analysis_failed(
         self,
         message: str,
+        elapsed_ms: float,
         customer_text: str,
         ocr_text: str,
         style_profile: dict | None,
     ) -> None:
+        self._set_stage_metric("analyze_ms", elapsed_ms)
         analysis = self.case_analyzer.analyze(
             customer_text,
             ocr_text,
@@ -524,6 +661,23 @@ class MainWindow(QMainWindow):
         self._show_case_analysis(analysis, "Fallback")
         self._set_status(f"{message} Использован локальный анализ.")
         self._set_busy(False)
+
+    def _preview_finished(self, payload: dict, elapsed_ms: float) -> None:
+        self._set_stage_metric("preview_ms", elapsed_ms)
+        draft_reply = str(payload.get("draft_reply", "")).strip()
+        self.response_text.setPlainText(draft_reply)
+        self.last_generated_raw_response = ""
+        self.last_generated_model = ""
+        self.last_generated_style_id = None
+        self._set_response_feedback_enabled(False)
+        self._show_analysis_payload(payload, "Preview")
+        topic = str(payload.get("topic", "Общее обращение"))
+        self._set_status(f"Черновик собран через FastAPI · {self._format_duration(elapsed_ms)} · тема: {topic}")
+        self._set_busy(False)
+
+    def _preview_failed(self, message: str, elapsed_ms: float) -> None:
+        self._set_stage_metric("preview_ms", elapsed_ms)
+        self._worker_failed(message)
 
     def _generation_finished(
         self,
@@ -534,6 +688,7 @@ class MainWindow(QMainWindow):
         elapsed_ms: float,
     ) -> None:
         try:
+            self._set_stage_metric("generate_ms", elapsed_ms)
             self.response_text.setPlainText(text)
             self.last_generated_raw_response = text
             self.last_generated_model = model
@@ -548,9 +703,9 @@ class MainWindow(QMainWindow):
                 """
                 INSERT INTO conversations(
                     customer_text, ocr_text, response_text, model_name, style_id,
-                    topic, signals_json, extracted_json, generation_ms
+                    topic, signals_json, extracted_json, ocr_ms, analyze_ms, preview_ms, generation_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self.customer_text.toPlainText(),
@@ -561,6 +716,9 @@ class MainWindow(QMainWindow):
                     analysis.topic,
                     Database.encode_json({"signals": analysis.signals}),
                     Database.encode_json(analysis.extracted),
+                    int(self.stage_metrics.get("ocr_ms") or 0),
+                    int(self.stage_metrics.get("analyze_ms") or 0),
+                    int(self.stage_metrics.get("preview_ms") or 0),
                     int(elapsed_ms),
                 ),
             )
@@ -579,10 +737,11 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
-        for button in [self.load_button, self.generate_button, self.save_to_style_button, self.clear_button]:
+        for button in [self.load_button, self.preview_button, self.generate_button, self.save_to_style_button, self.clear_button]:
             button.setEnabled(not busy)
         self._refresh_analyze_button_state()
         self.refresh_button.setEnabled(not busy)
+        self._sync_topic_override_controls()
 
         has_ocr_feedback = bool(self.last_ocr_raw_text)
         has_response_feedback = bool(self.last_generated_raw_response)
@@ -594,10 +753,14 @@ class MainWindow(QMainWindow):
     def _set_ocr_feedback_enabled(self, enabled: bool) -> None:
         self.ocr_feedback_correct_button.setEnabled(enabled)
         self.ocr_feedback_save_button.setEnabled(enabled)
+        self.ocr_feedback_correct_button.setVisible(enabled)
+        self.ocr_feedback_save_button.setVisible(enabled)
 
     def _set_response_feedback_enabled(self, enabled: bool) -> None:
         self.response_feedback_correct_button.setEnabled(enabled)
         self.response_feedback_save_button.setEnabled(enabled)
+        self.response_feedback_correct_button.setVisible(enabled)
+        self.response_feedback_save_button.setVisible(enabled)
 
     def mark_ocr_correct(self) -> None:
         text = self.ocr_text.toPlainText().strip()
@@ -699,6 +862,46 @@ class MainWindow(QMainWindow):
         self.settings.update(selected_style_id=updated.id)
         return updated
 
+    def save_topic_correction(self) -> None:
+        if not self.last_case_analysis:
+            QMessageBox.information(self, "Нет анализа", "Сначала выполните анализ обращения.")
+            return
+        corrected_topic = self.topic_override_combo.currentText().strip()
+        if not corrected_topic:
+            QMessageBox.information(self, "Нет темы", "Выберите тему из списка.")
+            return
+        style = self.style_manager.get_style(self.settings.values.selected_style_id)
+        if not style:
+            QMessageBox.warning(self, "Стиль не выбран", "Выберите активный стиль, чтобы обучение было контекстным.")
+            return
+
+        self.style_manager.learn_from_topic_correction(
+            style.id,
+            self.customer_text.toPlainText(),
+            self.ocr_text.toPlainText(),
+            corrected_topic,
+        )
+        self.database.execute(
+            """
+            INSERT INTO topic_feedback(customer_text, ocr_text, raw_topic, corrected_topic, style_id)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                self.customer_text.toPlainText(),
+                self.ocr_text.toPlainText(),
+                self.last_case_analysis.topic,
+                corrected_topic,
+                style.id,
+            ),
+        )
+        corrected_analysis = CaseAnalysis(
+            topic=corrected_topic,
+            signals=list(self.last_case_analysis.signals),
+            extracted=dict(self.last_case_analysis.extracted),
+        )
+        self._show_case_analysis(corrected_analysis, "Подтверждено")
+        self._set_status(f"Тема сохранена и усилила стиль: {corrected_topic}")
+
     def apply_processing_mode(self) -> None:
         text_only = self.settings.values.processing_mode == "text_only"
         self.screenshot_panel.setVisible(not text_only)
@@ -723,7 +926,9 @@ class MainWindow(QMainWindow):
         animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     @staticmethod
-    def _format_duration(milliseconds: float) -> str:
+    def _format_duration(milliseconds: float | None) -> str:
+        if not milliseconds:
+            return "—"
         seconds = milliseconds / 1000
         if seconds < 60:
             return f"{seconds:.1f} сек"
@@ -745,6 +950,9 @@ class MainWindow(QMainWindow):
         ocr = self.ocr_text.toPlainText().strip()
         if not text and not ocr:
             self.case_summary.set_placeholder("Признаки появятся после ввода текста или OCR.")
+            self.last_case_analysis = None
+            self.last_case_source = "Ожидание"
+            self._sync_topic_override_controls(None)
             self._refresh_analyze_button_state()
             return
         style = self.style_manager.get_style(self.settings.values.selected_style_id)
@@ -765,26 +973,36 @@ class MainWindow(QMainWindow):
         )
         enabled = not self._busy and (has_text or can_use_ocr)
         self.analyze_button.setEnabled(enabled)
+        self.preview_button.setEnabled(not self._busy and has_text)
         if self._busy:
             self.analyze_button.setToolTip("Дождитесь завершения текущей операции.")
+            self.preview_button.setToolTip("Дождитесь завершения текущей операции.")
         elif can_use_ocr:
-            self.analyze_button.setToolTip("Сначала OCR, затем анализ обращения через FastAPI.")
+            self.analyze_button.setToolTip("Сделать всё по цепочке: OCR -> анализ -> черновик ответа.")
+            self.preview_button.setToolTip("Для черновика сначала нужен текст из сообщения или OCR.")
         elif has_text:
-            self.analyze_button.setToolTip("Анализировать обращение через FastAPI.")
+            self.analyze_button.setToolTip("Собрать тему обращения и быстрый черновик ответа через FastAPI.")
+            self.preview_button.setToolTip("Собрать быстрый черновик ответа через FastAPI без полной генерации.")
         elif self.settings.values.processing_mode == "text_only":
-            self.analyze_button.setToolTip("Введите сообщение, чтобы запустить анализ.")
+            self.analyze_button.setToolTip("Введите сообщение, чтобы подготовить черновик ответа.")
+            self.preview_button.setToolTip("Введите сообщение, чтобы собрать черновик.")
         elif not self.settings.values.use_ocr:
             self.analyze_button.setToolTip("Включите OCR или введите текст вручную.")
+            self.preview_button.setToolTip("Введите текст вручную или сначала получите OCR.")
         else:
             self.analyze_button.setToolTip("Загрузите скриншот или введите сообщение.")
+            self.preview_button.setToolTip("Нужен текст сообщения или OCR-контекст.")
 
     def _show_case_analysis(self, analysis: CaseAnalysis, source: str) -> None:
+        self.last_case_analysis = analysis
+        self.last_case_source = source
         self.case_summary.set_analysis(
             topic=analysis.topic,
             signals=analysis.signals,
             extracted=analysis.extracted,
             source=source,
         )
+        self._sync_topic_override_controls(analysis.topic)
 
     def _show_analysis_payload(self, payload: dict, source: str) -> None:
         topic = str(payload.get("topic", "Общее обращение"))

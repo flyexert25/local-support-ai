@@ -11,8 +11,8 @@ from app.ocr.ocr_manager import OCRManager
 
 
 class OCRWorker(QObject):
-    finished = pyqtSignal(str)
-    failed = pyqtSignal(str)
+    finished = pyqtSignal(str, float)
+    failed = pyqtSignal(str, float)
 
     def __init__(self, ocr_manager: OCRManager, image_path: Path) -> None:
         super().__init__()
@@ -20,10 +20,14 @@ class OCRWorker(QObject):
         self.image_path = image_path
 
     def run(self) -> None:
+        started_at = perf_counter()
         try:
-            self.finished.emit(self.ocr_manager.recognize(self.image_path))
+            text = self.ocr_manager.recognize(self.image_path)
+            elapsed_ms = (perf_counter() - started_at) * 1000
+            self.finished.emit(text, elapsed_ms)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            elapsed_ms = (perf_counter() - started_at) * 1000
+            self.failed.emit(str(exc), elapsed_ms)
 
 
 class GenerateWorker(QObject):
@@ -67,8 +71,8 @@ class GenerateWorker(QObject):
 
 
 class BackendAnalyzeWorker(QObject):
-    finished = pyqtSignal(dict)
-    failed = pyqtSignal(str)
+    finished = pyqtSignal(dict, float)
+    failed = pyqtSignal(str, float)
 
     def __init__(
         self,
@@ -84,15 +88,50 @@ class BackendAnalyzeWorker(QObject):
         self.selected_style = selected_style
 
     def run(self) -> None:
+        started_at = perf_counter()
         try:
             payload = self.backend_client.analyze_request(
                 customer_text=self.customer_text,
                 ocr_text=self.ocr_text,
                 selected_style=self.selected_style,
             )
-            self.finished.emit(payload)
+            elapsed_ms = (perf_counter() - started_at) * 1000
+            self.finished.emit(payload, elapsed_ms)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            elapsed_ms = (perf_counter() - started_at) * 1000
+            self.failed.emit(str(exc), elapsed_ms)
+
+
+class BackendPreviewWorker(QObject):
+    finished = pyqtSignal(dict, float)
+    failed = pyqtSignal(str, float)
+
+    def __init__(
+        self,
+        backend_client: BackendClient,
+        customer_text: str,
+        ocr_text: str,
+        selected_style: str | None,
+    ) -> None:
+        super().__init__()
+        self.backend_client = backend_client
+        self.customer_text = customer_text
+        self.ocr_text = ocr_text
+        self.selected_style = selected_style
+
+    def run(self) -> None:
+        started_at = perf_counter()
+        try:
+            payload = self.backend_client.generate_preview(
+                customer_text=self.customer_text,
+                ocr_text=self.ocr_text,
+                selected_style=self.selected_style,
+            )
+            elapsed_ms = (perf_counter() - started_at) * 1000
+            self.finished.emit(payload, elapsed_ms)
+        except Exception as exc:
+            elapsed_ms = (perf_counter() - started_at) * 1000
+            self.failed.emit(str(exc), elapsed_ms)
 
 
 def start_worker(worker: QObject) -> QThread:

@@ -241,6 +241,51 @@ class StyleManager:
             raise ValueError("Не удалось обновить стиль")
         return updated
 
+    def learn_from_topic_correction(
+        self,
+        style_id: int,
+        customer_text: str,
+        ocr_text: str,
+        corrected_topic: str,
+    ) -> CommunicationStyle:
+        style = self.get_style(style_id)
+        if not style:
+            raise ValueError("Активный стиль не найден")
+
+        clean_topic = corrected_topic.strip()
+        if not clean_topic:
+            raise ValueError("Не выбрана тема для сохранения")
+
+        profile = dict(style.profile)
+        combined_text = "\n".join(part.strip() for part in [customer_text, ocr_text] if part and part.strip())
+        markers = self._extract_context_markers(combined_text, "")
+        profile["topic_hints"] = self._merge_topic_hints(
+            profile.get("topic_hints", []),
+            clean_topic,
+            markers,
+            combined_text,
+        )
+        if markers:
+            existing_terms = [
+                str(item).strip()
+                for item in profile.get("domain_terms", [])
+                if str(item).strip()
+            ]
+            profile["domain_terms"] = self._dedupe_terms([*markers, *existing_terms])[:40]
+
+        self.database.execute(
+            """
+            UPDATE styles
+            SET profile_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (Database.encode_json(profile), style_id),
+        )
+        updated = self.get_style(style_id)
+        if not updated:
+            raise ValueError("Не удалось обновить стиль")
+        return updated
+
     def build_style_prompt(self, style: CommunicationStyle | None) -> str:
         if not style:
             return "Пиши естественно, спокойно, без канцелярита и шаблонных AI-фраз."

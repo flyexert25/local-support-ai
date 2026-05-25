@@ -50,6 +50,9 @@ class Database:
                     topic TEXT NOT NULL DEFAULT '',
                     signals_json TEXT NOT NULL DEFAULT '{}',
                     extracted_json TEXT NOT NULL DEFAULT '{}',
+                    ocr_ms INTEGER NOT NULL DEFAULT 0,
+                    analyze_ms INTEGER NOT NULL DEFAULT 0,
+                    preview_ms INTEGER NOT NULL DEFAULT 0,
                     generation_ms INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
@@ -83,9 +86,25 @@ class Database:
                 )
                 """
             )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS topic_feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    customer_text TEXT NOT NULL DEFAULT '',
+                    ocr_text TEXT NOT NULL DEFAULT '',
+                    raw_topic TEXT NOT NULL DEFAULT '',
+                    corrected_topic TEXT NOT NULL DEFAULT '',
+                    style_id INTEGER,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             self._ensure_column(db, "conversations", "topic", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(db, "conversations", "signals_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(db, "conversations", "extracted_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(db, "conversations", "ocr_ms", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(db, "conversations", "analyze_ms", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(db, "conversations", "preview_ms", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(db, "conversations", "generation_ms", "INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod

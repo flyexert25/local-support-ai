@@ -320,6 +320,9 @@ class SettingsDialog(QDialog):
 
         total = self.analytics.total_generated()
         average_generation_ms = self.analytics.average_generation_ms()
+        average_ocr_ms = self.analytics.average_stage_ms("ocr_ms")
+        average_analyze_ms = self.analytics.average_stage_ms("analyze_ms")
+        average_preview_ms = self.analytics.average_stage_ms("preview_ms")
         slowest_generation_ms = self.analytics.slowest_generation_ms()
         ocr_feedback = self.analytics.ocr_feedback_totals()
         response_feedback = self.analytics.response_feedback_totals()
@@ -372,6 +375,9 @@ class SettingsDialog(QDialog):
                 "Локальная статистика по ответам, сохранённая в SQLite.",
                 [
                     self._metric_row("Сгенерировано ответов", str(total)),
+                    self._metric_row("Средний OCR SLA", self._format_duration(average_ocr_ms)),
+                    self._metric_row("Средний Analyze SLA", self._format_duration(average_analyze_ms)),
+                    self._metric_row("Средний Preview SLA", self._format_duration(average_preview_ms)),
                     self._metric_row("Среднее SLA генерации", self._format_duration(average_generation_ms)),
                     self._metric_row("Самая долгая генерация", self._format_duration(slowest_generation_ms)),
                     self._metric_row("OCR проверено", str(ocr_feedback["total"])),
@@ -470,6 +476,9 @@ class SettingsDialog(QDialog):
         ollama_status = self.ai_manager.check_status()
         ocr_status = self.ocr_manager.status()
         average_generation_ms = self.analytics.average_generation_ms()
+        average_ocr_ms = self.analytics.average_stage_ms("ocr_ms")
+        average_analyze_ms = self.analytics.average_stage_ms("analyze_ms")
+        average_preview_ms = self.analytics.average_stage_ms("preview_ms")
         slowest_generation_ms = self.analytics.slowest_generation_ms()
 
         active_mode = "Только текст" if self.settings.values.processing_mode == "text_only" else "Текст + vision"
@@ -503,6 +512,9 @@ class SettingsDialog(QDialog):
 
         performance_rows = [
             self._metric_row("Сгенерировано ответов", str(self.analytics.total_generated())),
+            self._metric_row("Средний OCR SLA", self._format_duration(average_ocr_ms)),
+            self._metric_row("Средний Analyze SLA", self._format_duration(average_analyze_ms)),
+            self._metric_row("Средний Preview SLA", self._format_duration(average_preview_ms)),
             self._metric_row("Среднее SLA", self._format_duration(average_generation_ms)),
             self._metric_row("Самое долгое SLA", self._format_duration(slowest_generation_ms)),
             self._metric_row("OCR-движок", self.settings.values.ocr_engine),

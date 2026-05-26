@@ -50,6 +50,10 @@ class GeneratePreviewResponse(BaseModel):
     topic: str
     signals: list[str]
     extracted: dict[str, list[str]]
+    customer_tone: str
+    escalation_risk: str
+    priority: str
+    reply_style_label: str | None = None
     quality_rules: list[str]
     knowledge_articles: list[str]
     knowledge_facts: list[str]
@@ -87,6 +91,7 @@ def analyze_request(data: AnalyzeRequest):
         data.customer_text,
         data.ocr_text or "",
         style_profile=style.profile if style else None,
+        reply_style_label=style.name if style else None,
     )
 
     return {
@@ -97,6 +102,10 @@ def analyze_request(data: AnalyzeRequest):
         "topic": analysis.topic,
         "signals": analysis.signals,
         "extracted": analysis.extracted,
+        "customer_tone": analysis.customer_tone,
+        "escalation_risk": analysis.escalation_risk,
+        "priority": analysis.priority,
+        "reply_style_label": analysis.reply_style_label,
     }
 
 
@@ -107,6 +116,7 @@ def generate_preview(data: GeneratePreviewRequest):
         data.customer_text,
         data.ocr_text or "",
         style_profile=style.profile if style else None,
+        reply_style_label=style.name if style else None,
     )
     knowledge_matches = knowledge_service.search(
         customer_text=data.customer_text,
@@ -136,6 +146,10 @@ def generate_preview(data: GeneratePreviewRequest):
         topic=analysis.topic,
         signals=analysis.signals,
         extracted=analysis.extracted,
+        customer_tone=analysis.customer_tone,
+        escalation_risk=analysis.escalation_risk,
+        priority=analysis.priority,
+        reply_style_label=analysis.reply_style_label,
         quality_rules=quality_rules,
         knowledge_articles=knowledge_titles,
         knowledge_facts=knowledge_facts[:2],

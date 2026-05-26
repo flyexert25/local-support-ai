@@ -5,33 +5,46 @@ from pathlib import Path
 
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, pyqtProperty, pyqtSignal
 from PyQt6.QtGui import QColor, QDragEnterEvent, QDropEvent, QPainter, QPixmap
-from PyQt6.QtWidgets import QAbstractButton, QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QAbstractButton,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app.utils.image_utils import SUPPORTED_IMAGE_EXTENSIONS
 
 
 class StatusPill(QLabel):
-    def __init__(self, text: str, color: str = "#9AA4B2") -> None:
-        super().__init__(text)
+    def __init__(self, text: str, ok: bool = True) -> None:
+        super().__init__()
         self.setObjectName("StatusPill")
         self.setTextFormat(Qt.TextFormat.RichText)
-        self._ok = True
-        self.setMinimumHeight(26)
-        self.set_state(text, True)
-
-    def set_color(self, color: str) -> None:
-        self.set_state(self.text().replace("● ", ""), color.lower() not in {"#f2a65a", "#d9822b", "#a86b14"})
+        self.setMinimumHeight(28)
+        self.set_state(text, ok)
 
     def set_state(self, text: str, ok: bool) -> None:
-        self._ok = ok
         self.setProperty("ok", ok)
         dot_color = "#2F9E66" if ok else "#D9822B"
         self.setText(f'<span style="color:{dot_color};">●</span> {escape(text)}')
-        self._apply_style()
-
-    def _apply_style(self) -> None:
         self.style().unpolish(self)
         self.style().polish(self)
+
+
+class DotStatusLabel(QLabel):
+    def __init__(self, text: str, ok: bool = True) -> None:
+        super().__init__()
+        self.setObjectName("DotStatus")
+        self.setTextFormat(Qt.TextFormat.RichText)
+        self.set_state(text, ok)
+
+    def set_state(self, text: str, ok: bool) -> None:
+        dot_color = "#2F9E66" if ok else "#D9822B"
+        self.setText(f'<span style="color:{dot_color};">●</span> {escape(text)}')
 
 
 class ScreenshotDropZone(QFrame):
@@ -44,7 +57,7 @@ class ScreenshotDropZone(QFrame):
         self._pixmap_label = QLabel("Перетащите скриншот сюда\nили вставьте через Ctrl+V")
         self._pixmap_label.setObjectName("Hint")
         self._pixmap_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._pixmap_label.setMinimumHeight(260)
+        self._pixmap_label.setMinimumHeight(180)
         self._pixmap_label.setWordWrap(True)
 
         layout = QVBoxLayout(self)
@@ -98,6 +111,57 @@ class ScreenshotDropZone(QFrame):
         self.style().polish(self)
 
 
+class AnalyticsChips(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(6)
+        self.setVisible(False)
+
+    def set_items(self, items: list[str]) -> None:
+        while self.layout.count():
+            item = self.layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for item in items:
+            chip = QLabel(item)
+            chip.setObjectName("InsightChip")
+            chip.setMinimumHeight(24)
+            chip.setProperty("semantic", self._chip_semantic(item))
+            chip.style().unpolish(chip)
+            chip.style().polish(chip)
+            self.layout.addWidget(chip)
+        self.layout.addStretch(1)
+        self.setVisible(bool(items))
+
+    @staticmethod
+    def _chip_semantic(text: str) -> str:
+        clean = text.strip().lower()
+        if clean.startswith("тема:"):
+            return "positive"
+        if clean.startswith("тон:"):
+            if "негатив" in clean or "резк" in clean:
+                return "negative"
+            return "positive"
+        if clean.startswith("риск:"):
+            if "высок" in clean:
+                return "negative"
+            if "средн" in clean:
+                return "warning"
+            return "positive"
+        if clean.startswith("приоритет:"):
+            if "высок" in clean:
+                return "negative"
+            if "повыш" in clean:
+                return "warning"
+            return "positive"
+        if clean.startswith("стиль:"):
+            return "accent"
+        return "neutral"
+
+
 class CaseInsightPanel(QFrame):
     def __init__(self) -> None:
         super().__init__()
@@ -105,44 +169,46 @@ class CaseInsightPanel(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(6)
-
-        self.topic_label = QLabel("Предмет не определён")
+        self.topic_label = QLabel("Тема не определена")
         self.topic_label.setObjectName("InsightTopic")
         self.source_label = QLabel("Локально")
         self.source_label.setObjectName("InsightSource")
-        self.source_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-        self.source_label.setMinimumHeight(24)
-        self.source_label.setMinimumWidth(92)
         top_row.addWidget(self.topic_label, 1)
         top_row.addWidget(self.source_label)
         layout.addLayout(top_row)
 
-        self.signals_widget = QWidget()
-        self.signals_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        self.signals_layout = QHBoxLayout(self.signals_widget)
-        self.signals_layout.setContentsMargins(0, 0, 0, 0)
-        self.signals_layout.setSpacing(6)
-        layout.addWidget(self.signals_widget)
+        self.meta_container = QWidget()
+        self.meta_layout = QVBoxLayout(self.meta_container)
+        self.meta_layout.setContentsMargins(0, 0, 0, 0)
+        self.meta_layout.setSpacing(6)
+        layout.addWidget(self.meta_container)
 
-        self.details_label = QLabel("Признаки появятся после ввода текста или OCR.")
+        self.chips = AnalyticsChips()
+        layout.addWidget(self.chips)
+
+        self.details_label = QLabel("Подробности появятся после анализа обращения.")
         self.details_label.setObjectName("InsightDetails")
         self.details_label.setWordWrap(True)
         layout.addWidget(self.details_label)
-        layout.addStretch(0)
+
+        self.raw_context = QTextEdit()
+        self.raw_context.setReadOnly(True)
+        self.raw_context.setObjectName("ExpertContext")
+        self.raw_context.setMaximumHeight(120)
+        layout.addWidget(self.raw_context)
         self.set_placeholder()
 
-    def set_placeholder(self, text: str = "Признаки появятся после ввода текста или OCR.") -> None:
-        self.topic_label.setText("Предмет не определён")
+    def set_placeholder(self, text: str = "Подробности появятся после анализа обращения.") -> None:
+        self.topic_label.setText("Тема не определена")
         self.source_label.setText("Ожидание")
-        self._set_chips([])
+        self._set_meta_rows([])
+        self.chips.set_items([])
         self.details_label.setText(text)
-        self.details_label.setVisible(True)
+        self.raw_context.clear()
 
     def set_analysis(
         self,
@@ -150,40 +216,62 @@ class CaseInsightPanel(QFrame):
         signals: list[str],
         extracted: dict[str, list[str]],
         source: str = "Локально",
+        customer_tone: str | None = None,
+        escalation_risk: str | None = None,
+        priority: str | None = None,
+        reply_style_label: str | None = None,
     ) -> None:
-        self.topic_label.setText(topic or "Предмет не определён")
-        self.source_label.setText(source)
-        visible_signals = signals[:4]
-        self._set_chips(visible_signals)
+        self.topic_label.setText(topic or "Тема не определена")
+        self.source_label.setText(source or "Локально")
 
-        details: list[str] = []
+        rows = [
+            ("Тон клиента", customer_tone or "Нейтральный"),
+            ("Риск эскалации", escalation_risk or "Низкий"),
+            ("Приоритет", priority or "Обычный"),
+            ("Стиль ответа", reply_style_label or "Не выбран"),
+        ]
+        self._set_meta_rows(rows)
+        self.chips.set_items(signals[:4])
+
+        detail_parts: list[str] = []
         if extracted.get("amounts"):
-            details.append("Суммы: " + ", ".join(extracted["amounts"][:3]))
+            detail_parts.append("Суммы: " + ", ".join(extracted["amounts"][:3]))
         if extracted.get("dates"):
-            details.append("Даты: " + ", ".join(extracted["dates"][:3]))
+            detail_parts.append("Даты: " + ", ".join(extracted["dates"][:3]))
         if extracted.get("mcc_codes"):
-            details.append("MCC: " + ", ".join(extracted["mcc_codes"][:4]))
-        if details:
-            details_text = " · ".join(details)
-        elif visible_signals:
-            details_text = ""
-        else:
-            details_text = "Явных признаков пока нет."
-        self.details_label.setText(details_text)
-        self.details_label.setVisible(bool(details_text))
+            detail_parts.append("MCC: " + ", ".join(extracted["mcc_codes"][:4]))
 
-    def _set_chips(self, values: list[str]) -> None:
-        while self.signals_layout.count():
-            item = self.signals_layout.takeAt(0)
+        if detail_parts:
+            self.details_label.setText(" • ".join(detail_parts))
+            self.raw_context.setPlainText("\n".join(detail_parts))
+        elif signals:
+            self.details_label.setText("Выделены ключевые признаки обращения.")
+            self.raw_context.setPlainText("\n".join(signals))
+        else:
+            self.details_label.setText("Явных признаков пока нет.")
+            self.raw_context.clear()
+
+    def _set_meta_rows(self, rows: list[tuple[str, str]]) -> None:
+        while self.meta_layout.count():
+            item = self.meta_layout.takeAt(0)
             widget = item.widget()
-            if widget:
+            if widget is not None:
                 widget.deleteLater()
-        for value in values:
-            chip = QLabel(value)
-            chip.setObjectName("InsightChip")
-            chip.setMinimumHeight(24)
-            self.signals_layout.addWidget(chip)
-        self.signals_layout.addStretch(1)
+
+        for title, value in rows:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(10)
+            left = QLabel(title)
+            left.setObjectName("InsightMetaLabel")
+            right = QLabel(value)
+            right.setObjectName("InsightMetaValue")
+            right.setWordWrap(True)
+            right.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            row_layout.addWidget(left, 1)
+            row_layout.addWidget(right, 1)
+            self.meta_layout.addWidget(row)
 
 
 class ToggleSwitch(QAbstractButton):
@@ -210,9 +298,9 @@ class ToggleSwitch(QAbstractButton):
             knob_color = QColor("#A7B0BC")
             border_color = QColor("#38404D")
         else:
-            track_color = QColor("#48A9E6") if self.isChecked() else QColor("#303745")
+            track_color = QColor("#5A67FF") if self.isChecked() else QColor("#303745")
             knob_color = QColor("#F7FAFC")
-            border_color = QColor("#62B7EB") if self.isChecked() else QColor("#414A59")
+            border_color = QColor("#7C87FF") if self.isChecked() else QColor("#414A59")
 
         painter.setPen(border_color)
         painter.setBrush(track_color)

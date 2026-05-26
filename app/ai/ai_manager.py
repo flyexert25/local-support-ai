@@ -31,24 +31,24 @@ class LocalOnlySession(requests.Session):
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or parsed.hostname not in LOCAL_HOSTS:
-            raise LocalNetworkError("Р Р°Р·СЂРµС€РµРЅС‹ С‚РѕР»СЊРєРѕ Р»РѕРєР°Р»СЊРЅС‹Рµ РїРѕРґРєР»СЋС‡РµРЅРёСЏ Рє localhost.")
+            raise LocalNetworkError("Разрешены только локальные подключения к localhost.")
         return super().request(method, url, **kwargs)
 
 
 class AIManager:
     FORBIDDEN_REPLY_PATTERNS = (
-        r"\bРґРѕСЃРІРёРґРѕСЃ\b",
-        r"\bРїРѕС…РµСЂ\b",
-        r"\bРїРѕС„РёРі\b",
-        r"\bС…СЂРµРЅ\b",
-        r"\bРЅР°С…\b",
-        r"\bРёРґРёРѕС‚\b",
-        r"\bС‚СѓРї",
-        r"\bР±СЂРµРґ\b",
-        r"\bР·Р°С‚РєРЅРё",
-        r"\bРЅРµРёРЅС‚РµСЂРµСЃРЅ\w*\b",
-        r"\bРѕС‚РІР°Р»Рё\b",
-        r"\bРІР°Р»Рё\b",
+        r"\bдосвидос\b",
+        r"\bпохер\b",
+        r"\bпофиг\b",
+        r"\bхрен\b",
+        r"\bнах\b",
+        r"\bидиот\b",
+        r"\bтуп",
+        r"\bбред\b",
+        r"\bзаткни",
+        r"\bнеинтересн\w*\b",
+        r"\bотвали\b",
+        r"\bвали\b",
     )
 
     def __init__(self, settings: SettingsManager) -> None:
@@ -61,7 +61,7 @@ class AIManager:
 
     def check_status(self) -> OllamaStatus:
         if self.settings.values.network_disabled:
-            return OllamaStatus(False, [], [], "РЎРµС‚РµРІРѕР№ РґРѕСЃС‚СѓРї РїРѕР»РЅРѕСЃС‚СЊСЋ РѕС‚РєР»СЋС‡РµРЅ РІ РЅР°СЃС‚СЂРѕР№РєР°С….")
+            return OllamaStatus(False, [], [], "Сетевой доступ полностью отключен в настройках.")
         try:
             response = self.session.get(f"{self.base_url}/api/tags", timeout=2.5)
             response.raise_for_status()
@@ -73,11 +73,11 @@ class AIManager:
                     True,
                     installed,
                     [],
-                    "Ollama РїРѕРґРєР»СЋС‡РµРЅ, РЅРѕ vision-РјРѕРґРµР»СЊ РЅРµ РЅР°Р№РґРµРЅР°.",
+                    "Ollama подключен, но vision-модель не найдена.",
                 )
-            return OllamaStatus(True, installed, supported, "Р›РѕРєР°Р»СЊРЅР°СЏ РјРѕРґРµР»СЊ РїРѕРґРєР»СЋС‡РµРЅР°.")
+            return OllamaStatus(True, installed, supported, "Локальная модель подключена.")
         except (requests.RequestException, LocalNetworkError, json.JSONDecodeError) as exc:
-            return OllamaStatus(False, [], [], f"Ollama РЅРµРґРѕСЃС‚СѓРїРµРЅ: {exc}")
+            return OllamaStatus(False, [], [], f"Ollama недоступен: {exc}")
 
     def generate_reply(
         self,
@@ -91,9 +91,9 @@ class AIManager:
         knowledge_facts: list[str] | None = None,
     ) -> str:
         if self.settings.values.network_disabled:
-            raise LocalNetworkError("РЎРµС‚РµРІРѕР№ РґРѕСЃС‚СѓРї РїРѕР»РЅРѕСЃС‚СЊСЋ РѕС‚РєР»СЋС‡РµРЅ. Ollama localhost РЅРµРґРѕСЃС‚СѓРїРµРЅ.")
+            raise LocalNetworkError("Сетевой доступ полностью отключен. Ollama localhost недоступен.")
         if not model:
-            raise ValueError("РќРµ РІС‹Р±СЂР°РЅР° Р»РѕРєР°Р»СЊРЅР°СЏ РјРѕРґРµР»СЊ Ollama.")
+            raise ValueError("Не выбрана локальная модель Ollama.")
         prompt = self._build_prompt(
             customer_text,
             ocr_text,
@@ -125,7 +125,7 @@ class AIManager:
         data = response.json()
         text = str(data.get("response", "")).strip()
         if not text:
-            raise RuntimeError("РњРѕРґРµР»СЊ РІРµСЂРЅСѓР»Р° РїСѓСЃС‚РѕР№ РѕС‚РІРµС‚.")
+            raise RuntimeError("Модель вернула пустой ответ.")
         return self._cleanup_reply(text)
 
     @staticmethod
@@ -135,7 +135,7 @@ class AIManager:
 
     @staticmethod
     def _cleanup_reply(text: str) -> str:
-        prefixes = ["Р“РѕС‚РѕРІС‹Р№ РѕС‚РІРµС‚:", "РћС‚РІРµС‚:", "РњРѕР¶РЅРѕ РѕС‚РІРµС‚РёС‚СЊ С‚Р°Рє:"]
+        prefixes = ["Готовый ответ:", "Ответ:", "Можно ответить так:"]
         cleaned = text.strip()
         for prefix in prefixes:
             if cleaned.lower().startswith(prefix.lower()):
@@ -157,7 +157,7 @@ class AIManager:
                 safe_sentences.append(sentence.strip())
             cleaned = " ".join(part for part in safe_sentences if part).strip()
             if not cleaned:
-                cleaned = "РџРѕРЅСЏР» РІР°СЃ. Р”Р°РІР°Р№С‚Рµ СЂРµС€РёРј РІРѕРїСЂРѕСЃ СЃРїРѕРєРѕР№РЅРѕ Рё РїРѕ СЃСѓС‚Рё."
+                cleaned = "Понял вас. Давайте решим вопрос спокойно и по сути."
         return cleaned
 
     @staticmethod
@@ -170,26 +170,26 @@ class AIManager:
         topic_hint: str | None,
         knowledge_facts: list[str],
     ) -> str:
-        customer_block = AIManager._normalize_context_text(customer_text, 650) or "[РЅРµС‚ С‚РµРєСЃС‚Р° РєР»РёРµРЅС‚Р°]"
+        customer_block = AIManager._normalize_context_text(customer_text, 650) or "[нет текста клиента]"
         ocr_block = AIManager._normalize_context_text(ocr_text, 750)
-        if ocr_block and customer_block != "[РЅРµС‚ С‚РµРєСЃС‚Р° РєР»РёРµРЅС‚Р°]" and ocr_block.lower() == customer_block.lower():
+        if ocr_block and customer_block != "[нет текста клиента]" and ocr_block.lower() == customer_block.lower():
             ocr_block = ""
 
         rules_block = AIManager._compact_rules_block(quality_rules)
         knowledge_block = AIManager._build_knowledge_block(topic_hint, knowledge_facts)
         return (
-            "РўС‹ РїРёС€РµС€СЊ РѕС‚РІРµС‚ РєР»РёРµРЅС‚Сѓ РѕС‚ Р»РёС†Р° Р¶РёРІРѕРіРѕ СЃРѕС‚СЂСѓРґРЅРёРєР° РїРѕРґРґРµСЂР¶РєРё.\n"
-            "РџРёС€Рё СЃРїРѕРєРѕР№РЅРѕ, РїРѕ-С‡РµР»РѕРІРµС‡РµСЃРєРё Рё РїРѕ СЃСѓС‚Рё. РќРµ СѓРїРѕРјРёРЅР°Р№ РР, С€Р°Р±Р»РѕРЅС‹ РёР»Рё РІРЅСѓС‚СЂРµРЅРЅРёРµ РїСЂР°РІРёР»Р°.\n"
-            "Р•СЃР»Рё РґР°РЅРЅС‹С… РјР°Р»Рѕ, РЅРµ РІС‹РґСѓРјС‹РІР°Р№ РґРµС‚Р°Р»Рё Рё РЅРµ РѕР±РµС‰Р°Р№ С‚Рѕ, С‡РµРіРѕ РЅРµС‚ РІ СЃРѕРѕР±С‰РµРЅРёРё.\n\n"
+            "Ты пишешь ответ клиенту от лица живого сотрудника поддержки.\n"
+            "Пиши спокойно, по-человечески и по сути. Не упоминай ИИ, шаблоны или внутренние правила.\n"
+            "Если данных мало, не выдумывай детали и не обещай то, чего нет в сообщении.\n\n"
             f"{style_prompt}\n\n"
-            "РЈС‚РѕС‡РЅРµРЅРёСЏ РїРѕ РєР°С‡РµСЃС‚РІСѓ РѕС‚РІРµС‚Р°:\n"
+            "Уточнения по качеству ответа:\n"
             f"{rules_block}\n\n"
             f"{knowledge_block}"
-            "РЎРѕРѕР±С‰РµРЅРёРµ РєР»РёРµРЅС‚Р°:\n"
+            "Сообщение клиента:\n"
             f"{customer_block}\n\n"
-            "OCR-РєРѕРЅС‚РµРєСЃС‚:\n"
-            f"{ocr_block or '[РЅРµС‚ OCR-РєРѕРЅС‚РµРєСЃС‚Р°]'}\n\n"
-            "Р“РѕС‚РѕРІС‹Р№ РѕС‚РІРµС‚:"
+            "OCR-контекст:\n"
+            f"{ocr_block or '[нет OCR-контекста]'}\n\n"
+            "Готовый ответ:"
         )
 
     @staticmethod
@@ -229,7 +229,7 @@ class AIManager:
     def _compact_rules_block(quality_rules: str) -> str:
         lines = [line.strip() for line in quality_rules.splitlines() if line.strip()]
         if not lines:
-            return "- РџРёС€Рё СЏСЃРЅРѕ Рё Р±РµР· Р»РёС€РЅРµРіРѕ РѕС„РёС†РёРѕР·Р°."
+            return "- Пиши ясно и без лишнего официоза."
         return "\n".join(lines[:3])
 
     @staticmethod

@@ -10,6 +10,10 @@ class CaseAnalysis:
     topic: str
     signals: list[str]
     extracted: dict[str, list[str]]
+    customer_tone: str = "Нейтральный"
+    escalation_risk: str = "Низкий"
+    priority: str = "Обычный"
+    reply_style_label: str | None = None
 
     def to_display_text(self) -> str:
         signals = ", ".join(self.signals[:6]) if self.signals else "явных признаков пока нет"
@@ -21,7 +25,8 @@ class CaseAnalysis:
         if self.extracted.get("mcc_codes"):
             details.append("MCC: " + ", ".join(self.extracted["mcc_codes"][:4]))
         suffix = f" · {'; '.join(details)}" if details else ""
-        return f"Тема: {self.topic}. Признаки: {signals}{suffix}"
+        meta = f"Тон: {self.customer_tone}. Риск: {self.escalation_risk}. Приоритет: {self.priority}."
+        return f"Тема: {self.topic}. {meta} Признаки: {signals}{suffix}"
 
 
 class CaseAnalyzer:
@@ -134,11 +139,62 @@ class CaseAnalyzer:
         ("нужен аккуратный отказ", ("отказ", "невозможно", "не предусмотрено", "не можем")),
     )
 
+    NEGATIVE_TONE_MARKERS: tuple[str, ...] = (
+        "почему",
+        "жалоба",
+        "претенз",
+        "возмущ",
+        "недоволен",
+        "не понимаю",
+        "ошибка",
+        "обман",
+        "грабеж",
+        "грабёж",
+        "ужас",
+        "срочно",
+    )
+    SHARP_TONE_MARKERS: tuple[str, ...] = (
+        "аху",
+        "офиг",
+        "бесит",
+        "достали",
+        "что за",
+        "издеваетесь",
+        "немедленно",
+    )
+    HIGH_ESCALATION_MARKERS: tuple[str, ...] = (
+        "жалоба",
+        "претенз",
+        "суд",
+        "цб",
+        "центробанк",
+        "прокурат",
+        "роспотреб",
+        "немедленно",
+        "издеваетесь",
+        "грабеж",
+        "грабёж",
+    )
+    URGENT_PRIORITY_MARKERS: tuple[str, ...] = (
+        "срочно",
+        "сегодня",
+        "сейчас",
+        "немедленно",
+        "не работает",
+        "заблокир",
+        "арест",
+    )
+
     AMOUNT_RE = re.compile(r"(?:\d{1,3}(?:[ \u00a0]\d{3})+|\d+)(?:[,.]\d{1,2})?\s*(?:₽|руб\.?|р\b)", re.IGNORECASE)
     DATE_RE = re.compile(r"\b(?:\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|\d{1,2}\s+[а-яё]+)\b", re.IGNORECASE)
     MCC_RE = re.compile(r"\b(?:MCC[-\s]?)?(\d{4})(?:\s*[–-]\s*(\d{4}))?\b", re.IGNORECASE)
 
-    def analyze(self, *parts: str, style_profile: dict[str, Any] | None = None) -> CaseAnalysis:
+    def analyze(
+        self,
+        *parts: str,
+        style_profile: dict[str, Any] | None = None,
+        reply_style_label: str | None = None,
+    ) -> CaseAnalysis:
         text = "\n".join(part for part in parts if part).strip()
         lowered = text.lower()
         topic = self._detect_topic(lowered, style_profile=style_profile)
@@ -146,7 +202,18 @@ class CaseAnalyzer:
             topic = self._detect_style_topic(lowered, style_profile)
         signals = self._detect_signals(lowered)
         extracted = self._extract_entities(text)
-        return CaseAnalysis(topic=topic, signals=signals, extracted=extracted)
+        tone = self._detect_customer_tone(text, lowered)
+        escalation_risk = self._detect_escalation_risk(lowered, tone, topic, signals)
+        priority = self._detect_priority(lowered, topic, signals, extracted, escalation_risk)
+        return CaseAnalysis(
+            topic=topic,
+            signals=signals,
+            extracted=extracted,
+            customer_tone=tone,
+            escalation_risk=escalation_risk,
+            priority=priority,
+            reply_style_label=reply_style_label,
+        )
 
     def _detect_topic(self, lowered: str, style_profile: dict[str, Any] | None = None) -> str:
         has_interest = any(marker in lowered for marker in self.INTEREST_MARKERS)
@@ -219,6 +286,63 @@ class CaseAnalyzer:
                 signals.append(signal)
         return signals
 
+    def _detect_customer_tone(self, text: str, lowered: str) -> str:
+        sharp_score = sum(1 for marker in self.SHARP_TONE_MARKERS if marker in lowered)
+        negative_score = sum(1 for marker in self.NEGATIVE_TONE_MARKERS if marker in lowered)
+        exclamations = text.count("!")
+
+        if sharp_score or exclamations >= 3:
+            return "Резкий"
+        if negative_score or exclamations >= 1:
+            return "Негативный"
+        if "пожалуйста" in lowered or "подскажите" in lowered:
+            return "Спокойный"
+        return "Нейтральный"
+
+    def _detect_escalation_risk(
+        self,
+        lowered: str,
+        tone: str,
+        topic: str,
+        signals: list[str],
+    ) -> str:
+        if any(marker in lowered for marker in self.HIGH_ESCALATION_MARKERS):
+            return "Высокий"
+        if tone == "Резкий":
+            return "Высокий"
+        if topic.startswith("Арест /") or "есть риск недовольства" in signals:
+            return "Средний"
+        if tone == "Негативный":
+            return "Средний"
+        return "Низкий"
+
+    def _detect_priority(
+        self,
+        lowered: str,
+        topic: str,
+        signals: list[str],
+        extracted: dict[str, list[str]],
+        escalation_risk: str,
+    ) -> str:
+        amounts = extracted.get("amounts", [])
+        max_amount = max((self._extract_numeric_amount(value) for value in amounts), default=0.0)
+
+        if (
+            escalation_risk == "Высокий"
+            or topic.startswith("Арест /")
+            or any(marker in lowered for marker in self.URGENT_PRIORITY_MARKERS)
+            or max_amount >= 100000
+        ):
+            return "Высокий"
+        if (
+            escalation_risk == "Средний"
+            or "финансовая операция" in signals
+            or "нужен срок/статус" in signals
+            or max_amount >= 20000
+        ):
+            return "Повышенный"
+        return "Обычный"
+
     def _detect_style_topic(self, lowered: str, style_profile: dict[str, Any]) -> str:
         terms = [str(term).lower() for term in style_profile.get("domain_terms", [])]
         matches = [term for term in terms if len(term) >= 5 and term in lowered]
@@ -257,6 +381,25 @@ class CaseAnalyzer:
                 hits = 1
             scores[topic] = scores.get(topic, 0) + score + min(max(hits, 1), 3) - 1
         return scores
+
+    @staticmethod
+    def _extract_numeric_amount(value: str) -> float:
+        normalized = (
+            value.replace("₽", "")
+            .replace("руб.", "")
+            .replace("руб", "")
+            .replace("\u00a0", " ")
+            .replace(" ", "")
+            .replace(",", ".")
+            .strip()
+        )
+        match = re.search(r"\d+(?:\.\d+)?", normalized)
+        if not match:
+            return 0.0
+        try:
+            return float(match.group(0))
+        except ValueError:
+            return 0.0
 
     def _extract_entities(self, text: str) -> dict[str, list[str]]:
         amount_matches = list(self.AMOUNT_RE.finditer(text))

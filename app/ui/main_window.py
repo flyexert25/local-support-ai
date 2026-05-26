@@ -2,22 +2,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, Qt
-from PyQt6.QtGui import QIcon, QKeySequence, QShortcut
+from PyQt6.QtCore import QByteArray, QSize, Qt
+from PyQt6.QtGui import QIcon, QKeySequence, QPainter, QPixmap, QShortcut
+from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
-    QSplitter,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -33,9 +36,15 @@ from app.storage.database import Database
 from app.styles.style_manager import StyleManager
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.theme import apply_theme
-from app.ui.widgets import CaseInsightPanel, ScreenshotDropZone, StatusPill
+from app.ui.widgets import AnalyticsChips, CaseInsightPanel, StatusPill, ToggleSwitch
 from app.ui.workers import BackendAnalyzeWorker, BackendPreviewWorker, GenerateWorker, OCRWorker, start_worker
-from app.utils.image_utils import image_path_to_base64, load_pixmap, qimage_to_base64, qimage_to_png_bytes
+from app.utils.image_utils import (
+    SUPPORTED_IMAGE_EXTENSIONS,
+    image_path_to_base64,
+    load_pixmap,
+    qimage_to_base64,
+    qimage_to_png_bytes,
+)
 
 
 class MainWindow(QMainWindow):
@@ -56,6 +65,7 @@ class MainWindow(QMainWindow):
         self.backend_client = BackendClient(settings)
         self.case_analyzer = CaseAnalyzer()
         self.learning_manager = LearningManager(database)
+
         self.current_image_path: Path | None = None
         self.current_clipboard_image_base64: str | None = None
         self.last_ocr_raw_text: str = ""
@@ -63,9 +73,8 @@ class MainWindow(QMainWindow):
         self.last_generated_model: str = ""
         self.last_generated_style_id: int | None = None
         self.last_case_analysis: CaseAnalysis | None = None
-        self.last_case_source: str = "Р В РЎвЂєР В Р’В¶Р В РЎвЂР В РўвЂР В Р’В°Р В Р вЂ¦Р В РЎвЂР В Р’Вµ"
-        self.pending_topic_hint: str | None = None
-        self.pending_knowledge_facts: list[str] = []
+        self.last_case_source: str = "Ожидание"
+        self.last_preview_payload: dict | None = None
         self.stage_metrics: dict[str, float | None] = {
             "ocr_ms": None,
             "analyze_ms": None,
@@ -73,6 +82,8 @@ class MainWindow(QMainWindow):
             "generate_ms": None,
         }
         self._busy = False
+        self._autofinalize_after_preview = False
+        self._negative_feedback_requested = False
         self.threads = []
         self.workers = []
 
@@ -80,253 +91,643 @@ class MainWindow(QMainWindow):
         icon_path = Path(__file__).resolve().parents[2] / "assets" / "app_icon.ico"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
-        self.resize(1280, 780)
-        self.setMinimumSize(980, 620)
+        self.resize(1320, 820)
+        self.setMinimumSize(980, 640)
         self.setAcceptDrops(True)
+
         self._build_ui()
+        self._apply_icon_set()
         self._bind_shortcuts()
         self._apply_window_settings()
+        self._apply_expert_mode(self.settings.values.expert_mode, persist=False)
+        self._apply_theme_button_state()
         self.refresh_status()
         self.apply_processing_mode()
+        self.update_case_summary()
 
     def _build_ui(self) -> None:
         root = QWidget()
+        root.setObjectName("AppShell")
         outer = QVBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         outer.addWidget(self._build_top_bar())
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_left_panel())
-        splitter.addWidget(self._build_right_panel())
-        splitter.setSizes([520, 760])
-        outer.addWidget(splitter, 1)
+        content = QWidget()
+        content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(18, 18, 18, 14)
+        content_layout.setSpacing(16)
+        self.left_rail = self._build_left_rail()
+        content_layout.addWidget(self.left_rail, 0)
+        content_layout.addWidget(self._build_main_column(), 5)
+        self.summary_column = self._build_summary_column()
+        self.expert_sidebar = self._build_expert_sidebar()
+        content_layout.addWidget(self.summary_column, 2)
+        content_layout.addWidget(self.expert_sidebar, 2)
+        outer.addWidget(content, 1)
 
-        self.status_message = QLabel("Р В РІР‚СљР В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В Р вЂ  Р В РЎвЂќ Р В Р’В»Р В РЎвЂўР В РЎвЂќР В Р’В°Р В Р’В»Р РЋР Р‰Р В Р вЂ¦Р В РЎвЂўР В РІвЂћвЂ“ Р РЋР вЂљР В Р’В°Р В Р’В±Р В РЎвЂўР РЋРІР‚С™Р В Р’Вµ")
-        self.status_message.setObjectName("Subtle")
-        self.status_message.setContentsMargins(16, 8, 16, 8)
-        outer.addWidget(self.status_message)
-        self.sla_message = QLabel()
-        self.sla_message.setObjectName("Subtle")
-        self.sla_message.setContentsMargins(16, 0, 16, 8)
-        outer.addWidget(self.sla_message)
-        self._update_sla_message()
+        outer.addWidget(self._build_footer())
         self.setCentralWidget(root)
 
     def _build_top_bar(self) -> QWidget:
         top = QWidget()
         top.setObjectName("TopBar")
         layout = QHBoxLayout(top)
-        layout.setContentsMargins(16, 10, 16, 10)
-        title_box = QVBoxLayout()
+        layout.setContentsMargins(18, 12, 18, 12)
+        layout.setSpacing(14)
+
+        self.logo_label = QLabel()
+        self.logo_label.setObjectName("LogoMark")
+        self.logo_label.setFixedSize(22, 22)
+        brand_box = QVBoxLayout()
+        brand_box.setSpacing(2)
         title = QLabel("Local Support AI")
         title.setObjectName("Title")
-        subtitle = QLabel("Offline-first Р В РЎвЂ“Р В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В Р’В°Р РЋРІР‚С™Р В РЎвЂўР РЋР вЂљ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р В РЎвЂўР В Р вЂ  Р В РЎвЂ”Р В РЎвЂў Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏР В РЎВ")
+        subtitle = QLabel("Offline-first генератор ответов по обращениям")
         subtitle.setObjectName("Subtle")
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
+        brand_box.addWidget(title)
+        brand_box.addWidget(subtitle)
 
-        self.local_pill = StatusPill("Р В РІР‚С”Р В РЎвЂўР В РЎвЂќР В Р’В°Р В Р’В»Р РЋР Р‰Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋР вЂљР В Р’ВµР В Р’В¶Р В РЎвЂР В РЎВ")
-        self.ocr_pill = StatusPill("OCR Р В РЎвЂ“Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В Р вЂ ")
-        self.model_pill = StatusPill("Qwen Р В РЎвЂ”Р В РЎвЂўР В РўвЂР В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР РЋРІР‚ВР В Р вЂ¦")
-        self.model_combo = QComboBox()
-        self.model_combo.setMinimumWidth(220)
-        self.model_combo.currentTextChanged.connect(self._model_changed)
+        self.local_status = StatusPill("Local", True)
+        self.ready_status = StatusPill("Готово", True)
 
-        self.refresh_button = QPushButton("Р В РЎвЂєР В Р’В±Р В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰")
-        self.refresh_button.clicked.connect(self.refresh_status)
-        self.settings_button = QPushButton("Р В РЎСљР В Р’В°Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР В РЎвЂўР В РІвЂћвЂ“Р В РЎвЂќР В РЎвЂ")
-        self.settings_button.clicked.connect(self.open_settings)
+        expert_box = QWidget()
+        expert_layout = QHBoxLayout(expert_box)
+        expert_layout.setContentsMargins(0, 0, 0, 0)
+        expert_layout.setSpacing(8)
+        expert_label = QLabel("Expert")
+        expert_label.setObjectName("Subtle")
+        self.expert_toggle = ToggleSwitch()
+        self.expert_toggle.setChecked(self.settings.values.expert_mode)
+        self.expert_toggle.toggled.connect(self._expert_toggled)
+        expert_layout.addWidget(expert_label)
+        expert_layout.addWidget(self.expert_toggle)
 
-        layout.addLayout(title_box, 1)
-        layout.addWidget(self.local_pill)
-        layout.addWidget(self.ocr_pill)
-        layout.addWidget(self.model_pill)
-        layout.addWidget(self.model_combo)
-        layout.addWidget(self.refresh_button)
-        layout.addWidget(self.settings_button)
+        self.theme_button = QPushButton()
+        self.theme_button.setObjectName("IconButton")
+        self.theme_button.setFixedSize(38, 38)
+        self.theme_button.clicked.connect(self._toggle_theme)
+
+        self.menu_button = QPushButton()
+        self.menu_button.setObjectName("IconButton")
+        self.menu_button.setFixedSize(38, 38)
+        self.menu_button.clicked.connect(self.open_settings)
+
+        layout.addWidget(self.logo_label)
+        layout.addLayout(brand_box)
+        layout.addStretch(1)
+        layout.addWidget(self.local_status)
+        layout.addWidget(self.ready_status)
+        layout.addWidget(expert_box)
+        layout.addWidget(self.theme_button)
+        layout.addWidget(self.menu_button)
         return top
 
-    def _build_left_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(16, 16, 8, 16)
-        layout.setSpacing(12)
+    def _build_left_rail(self) -> QFrame:
+        rail = QFrame()
+        rail.setObjectName("Rail")
+        rail.setFixedWidth(58)
+        layout = QVBoxLayout(rail)
+        layout.setContentsMargins(8, 12, 8, 12)
+        layout.setSpacing(10)
 
-        self.drop_zone = ScreenshotDropZone()
-        self.drop_zone.imageDropped.connect(self.load_image)
-        self.screenshot_panel = self._wrap_panel("Р В РЎСџР РЋР вЂљР В Р’ВµР В Р вЂ Р РЋР Р‰Р РЋР вЂ№ Р РЋР С“Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™Р В Р’В°", self.drop_zone)
-        layout.addWidget(self.screenshot_panel, 2)
+        self.rail_buttons_group = QButtonGroup(self)
+        self.rail_buttons_group.setExclusive(True)
+        self.rail_buttons: list[QPushButton] = []
+        self.rail_icon_names: list[str] = []
+        buttons = [
+            ("plus", "Новое обращение"),
+            ("message", "Текущий экран"),
+            ("analytics", "OCR и скриншоты"),
+            ("bookmark", "Стили ответов"),
+            ("history", "История и SLA"),
+            ("settings", "Настройки"),
+        ]
+        for index, (icon_name, tooltip) in enumerate(buttons):
+            button = QPushButton()
+            button.setObjectName("RailButton")
+            button.setCheckable(True)
+            button.setToolTip(tooltip)
+            button.setFixedSize(40, 40)
+            self.rail_icon_names.append(icon_name)
+            if index == 0:
+                button.clicked.connect(self.clear_all)
+            elif index == 1:
+                button.clicked.connect(lambda: self.customer_text.setFocus())
+            elif index == 5:
+                button.clicked.connect(self.open_settings)
+            else:
+                button.clicked.connect(lambda checked=False: self._expert_toggled(True))
+            self.rail_buttons_group.addButton(button, index)
+            layout.addWidget(button)
+            self.rail_buttons.append(button)
+        if len(self.rail_buttons) > 1:
+            self.rail_buttons[1].setChecked(True)
+        layout.addStretch(1)
+        return rail
 
-        self.customer_text = QPlainTextEdit()
-        self.customer_text.setPlaceholderText("Р В РІР‚в„ўР РЋР С“Р РЋРІР‚С™Р В Р’В°Р В Р вЂ Р РЋР Р‰Р РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ Р В РЎвЂР В Р’В»Р В РЎвЂ Р РЋРІР‚С›Р РЋР вЂљР В Р’В°Р В РЎвЂ“Р В РЎВР В Р’ВµР В Р вЂ¦Р РЋРІР‚С™ Р В РЎвЂ”Р В Р’ВµР РЋР вЂљР В Р’ВµР В РЎвЂ”Р В РЎвЂР РЋР С“Р В РЎвЂќР В РЎвЂ...")
-        self.customer_text.textChanged.connect(self.update_case_summary)
-        layout.addWidget(self._wrap_panel("Р В Р Р‹Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ", self.customer_text), 1)
+    def _build_main_column(self) -> QWidget:
+        column = QWidget()
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.message_card = self._build_message_card()
+        self.answer_card = self._build_answer_card()
+        self.section_divider = QFrame()
+        self.section_divider.setObjectName("SectionDivider")
+        self.section_divider.setFixedHeight(1)
+        layout.addWidget(self.message_card, 3)
+        layout.addWidget(self.section_divider)
+        layout.addWidget(self.answer_card, 4)
 
-        self.case_summary = CaseInsightPanel()
-        self.topic_override_combo = QComboBox()
-        self.topic_override_combo.addItems(self._available_topics())
-        self.topic_override_combo.setEditable(True)
-        if self.topic_override_combo.lineEdit():
-            self.topic_override_combo.lineEdit().setPlaceholderText("Р В РІР‚в„ўР РЋРІР‚в„–Р В Р’В±Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В РЎвЂР В Р’В»Р В РЎвЂ Р В Р вЂ Р В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋРІР‚С™Р В Р’ВµР В РЎВР РЋРЎвЂњ")
-        self.topic_override_combo.setEnabled(False)
-        self.topic_override_save_button = QPushButton("Р В Р Р‹Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰ Р РЋРІР‚С™Р В Р’ВµР В РЎВР РЋРЎвЂњ")
-        self.topic_override_save_button.setObjectName("Tiny")
-        self.topic_override_save_button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-        self.topic_override_save_button.setEnabled(False)
-        self.topic_override_save_button.clicked.connect(self.save_topic_correction)
-        self.topic_override_row = QWidget()
-        topic_override_layout = QHBoxLayout(self.topic_override_row)
-        topic_override_layout.setContentsMargins(0, 0, 0, 0)
-        topic_override_layout.setSpacing(8)
-        topic_override_layout.addWidget(self.topic_override_combo, 1)
-        topic_override_layout.addWidget(self.topic_override_save_button)
-        self.topic_override_row.setVisible(False)
-
-        analysis_body = QWidget()
-        analysis_layout = QVBoxLayout(analysis_body)
-        analysis_layout.setContentsMargins(0, 0, 0, 0)
-        analysis_layout.setSpacing(10)
-        analysis_layout.addWidget(self.case_summary, 1)
-        analysis_layout.addWidget(self.topic_override_row, 0)
-        analysis_panel = self._wrap_panel("Р В РЎвЂ™Р В Р вЂ¦Р В Р’В°Р В Р’В»Р В РЎвЂР РЋРІР‚С™Р В РЎвЂР В РЎвЂќР В Р’В° Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ", analysis_body)
-        analysis_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        analysis_panel.setMaximumHeight(196)
-        layout.addWidget(analysis_panel, 0)
-
-        buttons = QGridLayout()
-        self.load_button = QPushButton("Р В РІР‚вЂќР В Р’В°Р В РЎвЂ“Р РЋР вЂљР РЋРЎвЂњР В Р’В·Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰ Р РЋР С“Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™")
-        self.load_button.clicked.connect(self.open_image_dialog)
-        self.analyze_button = QPushButton("Р В РЎСџР В РЎвЂўР В РўвЂР В РЎвЂ“Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В Р вЂ Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™")
-        self.analyze_button.setObjectName("Secondary")
-        self.analyze_button.clicked.connect(self.analyze_screenshot)
-        self.analyze_button.setVisible(False)
-        self.clear_button = QPushButton("Р В РЎвЂєР РЋРІР‚РЋР В РЎвЂР РЋР С“Р РЋРІР‚С™Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰")
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(10)
+        self.clear_button = QPushButton("Очистить")
+        self.clear_button.setObjectName("Ghost")
         self.clear_button.clicked.connect(self.clear_all)
-        buttons.addWidget(self.load_button, 0, 0)
-        buttons.addWidget(self.clear_button, 0, 1)
-        layout.addLayout(buttons)
-        return panel
+        self.primary_action_button = QPushButton("Подготовить ответ  →")
+        self.primary_action_button.setObjectName("HeroButton")
+        self.primary_action_button.clicked.connect(self.prepare_answer)
+        bottom_row.addWidget(self.clear_button)
+        bottom_row.addStretch(1)
+        bottom_row.addWidget(self.primary_action_button)
+        layout.addLayout(bottom_row)
+        return column
 
-    def _build_right_panel(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 16, 16, 16)
+    def _build_message_card(self) -> QFrame:
+        frame = self._create_panel("Сообщение клиента")
+        frame.setProperty("flat_section", True)
+        layout = frame.layout()
         layout.setSpacing(12)
 
-        self.ocr_text = QPlainTextEdit()
-        self.ocr_text.setPlaceholderText("Р В РІР‚вЂќР В РўвЂР В Р’ВµР РЋР С“Р РЋР Р‰ Р В РЎвЂ”Р В РЎвЂўР РЋР РЏР В Р вЂ Р В РЎвЂР РЋРІР‚С™Р РЋР С“Р РЋР РЏ Р РЋР вЂљР В Р’В°Р РЋР С“Р В РЎвЂ”Р В РЎвЂўР В Р’В·Р В Р вЂ¦Р В Р’В°Р В Р вЂ¦Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™ Р РЋР С“Р В РЎвЂў Р РЋР С“Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™Р В Р’В°. Р В РЎС™Р В РЎвЂўР В Р’В¶Р В Р вЂ¦Р В РЎвЂў Р РЋР вЂљР В Р’ВµР В РўвЂР В Р’В°Р В РЎвЂќР РЋРІР‚С™Р В РЎвЂР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р В Р вЂ Р РЋР вЂљР РЋРЎвЂњР РЋРІР‚РЋР В Р вЂ¦Р РЋРЎвЂњР РЋР вЂ№.")
-        self.ocr_text.textChanged.connect(self.update_case_summary)
-        self.ocr_feedback_correct_button = QPushButton("OCR Р В Р вЂ Р В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂў")
-        self.ocr_feedback_correct_button.setObjectName("Tiny")
-        self.ocr_feedback_correct_button.clicked.connect(self.mark_ocr_correct)
-        self.ocr_feedback_save_button = QPushButton("Р В Р Р‹Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰ Р В РЎвЂР РЋР С“Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р В Р’В»Р В Р’ВµР В Р вЂ¦Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™")
-        self.ocr_feedback_save_button.setObjectName("Tiny")
-        self.ocr_feedback_save_button.clicked.connect(self.save_corrected_ocr_text)
-        ocr_actions = QHBoxLayout()
-        ocr_actions.addStretch(1)
-        ocr_actions.addWidget(self.ocr_feedback_correct_button)
-        ocr_actions.addWidget(self.ocr_feedback_save_button)
-        ocr_panel_body = QWidget()
-        ocr_panel_layout = QVBoxLayout(ocr_panel_body)
-        ocr_panel_layout.setContentsMargins(0, 0, 0, 0)
-        ocr_panel_layout.setSpacing(10)
-        ocr_panel_layout.addWidget(self.ocr_text, 1)
-        ocr_panel_layout.addLayout(ocr_actions)
-        layout.addWidget(self._wrap_panel("Р В Р’В Р В Р’В°Р РЋР С“Р В РЎвЂ”Р В РЎвЂўР В Р’В·Р В Р вЂ¦Р В Р’В°Р В Р вЂ¦Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™", ocr_panel_body), 1)
-        self._set_ocr_feedback_enabled(False)
+        self.customer_box = QFrame()
+        self.customer_box.setObjectName("InputBox")
+        customer_box_layout = QVBoxLayout(self.customer_box)
+        customer_box_layout.setContentsMargins(1, 1, 1, 1)
+        customer_box_layout.setSpacing(0)
+        self.customer_text = QPlainTextEdit()
+        self.customer_text.setObjectName("CustomerEditor")
+        self.customer_text.setPlaceholderText("Вставьте сообщение клиента или переписку. Скриншот можно добавить из буфера или выбрать файлом.")
+        self.customer_text.setFixedHeight(210)
+        self.customer_text.textChanged.connect(self.update_case_summary)
+        self.customer_text.textChanged.connect(self._update_message_counter)
+        customer_box_layout.addWidget(self.customer_text)
+        layout.addWidget(self.customer_box)
 
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.screenshot_button = QPushButton("Скриншот")
+        self.screenshot_button.setObjectName("Ghost")
+        self.screenshot_button.setToolTip("Добавить скриншот")
+        self.screenshot_button.clicked.connect(self.open_image_dialog)
+        self.ocr_only_button = QPushButton("OCR со скриншота")
+        self.ocr_only_button.setObjectName("Ghost")
+        self.ocr_only_button.clicked.connect(self._manual_ocr_only)
+        self.remove_screenshot_button = QPushButton("Убрать")
+        self.remove_screenshot_button.setObjectName("Tiny")
+        self.remove_screenshot_button.clicked.connect(self._clear_image_only)
+        self.remove_screenshot_button.setVisible(False)
+        self.attachment_label = QLabel("Скриншот не добавлен")
+        self.attachment_label.setObjectName("Subtle")
+        self.message_count_label = QLabel("0/4000")
+        self.message_count_label.setObjectName("Subtle")
+        actions.addWidget(self.screenshot_button)
+        actions.addWidget(self.ocr_only_button)
+        actions.addWidget(self.remove_screenshot_button)
+        actions.addWidget(self.attachment_label, 1)
+        actions.addWidget(self.message_count_label)
+        layout.addLayout(actions)
+        return frame
+
+    def _build_answer_card(self) -> QFrame:
+        frame = self._create_panel("Итоговый ответ")
+        frame.setProperty("flat_section", True)
+        layout = frame.layout()
+
+        header_title = layout.itemAt(0).widget()
+        if header_title is not None:
+            layout.removeWidget(header_title)
+            header_title.deleteLater()
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+        title = QLabel("Итоговый ответ")
+        title.setObjectName("PanelTitle")
+        header_row.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_row.addStretch(1)
+
+        self.answer_copy_icon = QPushButton()
+        self.answer_copy_icon.setObjectName("IconButton")
+        self.answer_copy_icon.setProperty("variant", "action")
+        self.answer_copy_icon.setToolTip("Копировать ответ")
+        self.answer_copy_icon.clicked.connect(self.copy_reply)
+        self.answer_save_icon = QPushButton()
+        self.answer_save_icon.setObjectName("IconButton")
+        self.answer_save_icon.setProperty("variant", "action")
+        self.answer_save_icon.setToolTip("Сохранить как удачный стиль")
+        self.answer_save_icon.clicked.connect(self.save_reply_to_style)
+        self.answer_like_icon = QPushButton()
+        self.answer_like_icon.setObjectName("IconButton")
+        self.answer_like_icon.setProperty("variant", "action")
+        self.answer_like_icon.setToolTip("Ответ удачный")
+        self.answer_like_icon.clicked.connect(self.mark_response_correct)
+        self.answer_dislike_icon = QPushButton()
+        self.answer_dislike_icon.setObjectName("IconButton")
+        self.answer_dislike_icon.setProperty("variant", "action")
+        self.answer_dislike_icon.setToolTip("Нужно исправить ответ")
+        self.answer_dislike_icon.clicked.connect(self._toggle_negative_feedback)
+        self.answer_rerun_icon = QPushButton()
+        self.answer_rerun_icon.setObjectName("IconButton")
+        self.answer_rerun_icon.setProperty("variant", "action")
+        self.answer_rerun_icon.setToolTip("Сгенерировать заново")
+        self.answer_rerun_icon.clicked.connect(self.prepare_answer)
+        for button in [
+            self.answer_copy_icon,
+            self.answer_save_icon,
+            self.answer_like_icon,
+            self.answer_dislike_icon,
+            self.answer_rerun_icon,
+        ]:
+            button.setFixedSize(28, 28)
+            header_row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(header_row)
+
+        self.response_box = QFrame()
+        self.response_box.setObjectName("ResponseBox")
+        response_box_layout = QVBoxLayout(self.response_box)
+        response_box_layout.setContentsMargins(1, 1, 1, 1)
+        response_box_layout.setSpacing(0)
         self.response_text = QPlainTextEdit()
-        self.response_text.setPlaceholderText("Р В РІР‚СљР В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В Р вЂ Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™ Р В РЎвЂ”Р В РЎвЂўР РЋР РЏР В Р вЂ Р В РЎвЂР РЋРІР‚С™Р РЋР С“Р РЋР РЏ Р В Р’В·Р В РўвЂР В Р’ВµР РЋР С“Р РЋР Р‰.")
-        self.response_feedback_correct_button = QPushButton("Р В РЎвЂєР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™ Р В Р вЂ Р В Р’ВµР РЋР вЂљР В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“")
-        self.response_feedback_correct_button.setObjectName("Tiny")
-        self.response_feedback_correct_button.clicked.connect(self.mark_response_correct)
-        self.response_feedback_save_button = QPushButton("Р В Р Р‹Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰ Р В РЎвЂР РЋР С“Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р В Р’В»Р В Р’ВµР В Р вЂ¦Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™")
+        self.response_text.setObjectName("ResponseEditor")
+        self.response_text.setPlaceholderText("Готовый ответ появится здесь.")
+        self.response_text.setMinimumHeight(280)
+        self.response_text.textChanged.connect(self._refresh_response_actions)
+        response_box_layout.addWidget(self.response_text)
+        layout.addWidget(self.response_box, 1)
+
+        self.analytics_chips = AnalyticsChips()
+        layout.addWidget(self.analytics_chips)
+
+        feedback_row = QHBoxLayout()
+        feedback_row.setContentsMargins(0, 4, 0, 0)
+        feedback_row.setSpacing(8)
+        self.feedback_caption = QLabel("Полезно?")
+        self.feedback_caption.setObjectName("Subtle")
+        self.feedback_positive_button = QPushButton()
+        self.feedback_positive_button.setObjectName("Tiny")
+        self.feedback_positive_button.setFixedSize(36, 32)
+        self.feedback_positive_button.setToolTip("Отметить ответ как удачный")
+        self.feedback_positive_button.clicked.connect(self.mark_response_correct)
+        self.feedback_negative_button = QPushButton()
+        self.feedback_negative_button.setObjectName("Tiny")
+        self.feedback_negative_button.setFixedSize(36, 32)
+        self.feedback_negative_button.setToolTip("Показать сохранение исправленного ответа")
+        self.feedback_negative_button.clicked.connect(self._toggle_negative_feedback)
+        self.copy_button = QPushButton("Копировать")
+        self.copy_button.setObjectName("Ghost")
+        self.copy_button.clicked.connect(self.copy_reply)
+        self.save_to_style_button = QPushButton("Сохранить как удачный стиль")
+        self.save_to_style_button.setObjectName("Ghost")
+        self.save_to_style_button.clicked.connect(self.save_reply_to_style)
+        feedback_row.addWidget(self.feedback_caption)
+        feedback_row.addWidget(self.feedback_positive_button)
+        feedback_row.addWidget(self.feedback_negative_button)
+        feedback_row.addStretch(1)
+        feedback_row.addWidget(self.save_to_style_button)
+        feedback_row.addWidget(self.copy_button)
+        layout.addLayout(feedback_row)
+
+        self.response_feedback_save_button = QPushButton("Сохранить исправленный ответ")
         self.response_feedback_save_button.setObjectName("Tiny")
         self.response_feedback_save_button.clicked.connect(self.save_corrected_response)
-        response_actions = QHBoxLayout()
-        response_actions.addStretch(1)
-        response_actions.addWidget(self.response_feedback_correct_button)
-        response_actions.addWidget(self.response_feedback_save_button)
-        response_panel_body = QWidget()
-        response_panel_layout = QVBoxLayout(response_panel_body)
-        response_panel_layout.setContentsMargins(0, 0, 0, 0)
-        response_panel_layout.setSpacing(10)
-        response_panel_layout.addWidget(self.response_text, 1)
-        response_panel_layout.addLayout(response_actions)
-        layout.addWidget(self._wrap_panel("Р В Р Р‹Р В РЎвЂ“Р В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’В°Р В Р вЂ¦Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™", response_panel_body), 1)
-        self._set_response_feedback_enabled(False)
+        self.response_feedback_save_button.setVisible(False)
+        layout.addWidget(self.response_feedback_save_button, 0, Qt.AlignmentFlag.AlignLeft)
+        return frame
 
-        buttons = QHBoxLayout()
-        self.preview_button = QPushButton("Р В РІР‚ВР РЋРІР‚в„–Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќ")
-        self.preview_button.setObjectName("Secondary")
-        self.preview_button.clicked.connect(self.generate_preview)
-        self.preview_button.setVisible(False)
-        self.generate_button = QPushButton("Р В Р Р‹Р В РЎвЂ“Р В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™")
-        self.generate_button.setObjectName("Primary")
-        self.generate_button.clicked.connect(self.run_primary_action)
-        self.save_to_style_button = QPushButton("Р В Р Р‹Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰ Р В Р вЂ  Р РЋР С“Р РЋРІР‚С™Р В РЎвЂР В Р’В»Р РЋР Р‰")
-        self.save_to_style_button.clicked.connect(self.save_reply_to_style)
-        self.copy_button = QPushButton("Р В РЎв„ўР В РЎвЂўР В РЎвЂ”Р В РЎвЂР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰")
-        self.copy_button.clicked.connect(self.copy_reply)
-        buttons.addStretch(1)
-        buttons.addWidget(self.preview_button)
-        buttons.addWidget(self.generate_button)
-        buttons.addWidget(self.save_to_style_button)
-        buttons.addWidget(self.copy_button)
-        layout.addLayout(buttons)
-        return panel
+    def _build_summary_column(self) -> QWidget:
+        column = QWidget()
+        column.setFixedWidth(260)
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+
+        self.summary_card = self._create_panel("Аналитика")
+        summary_layout = self.summary_card.layout()
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(6)
+        self.summary_source_label = QLabel("Ожидание")
+        self.summary_source_label.setObjectName("InsightSource")
+        header_row.addWidget(self.summary_source_label, 0, Qt.AlignmentFlag.AlignLeft)
+        header_row.addStretch(1)
+        summary_layout.addLayout(header_row)
+
+        self.summary_topic_value = self._summary_value("")
+        self.summary_tone_value = self._summary_value("")
+        self.summary_risk_value = self._summary_value("")
+        self.summary_priority_value = self._summary_value("")
+        self.summary_style_value = self._summary_value("")
+
+        summary_layout.addWidget(self._summary_pair("Тема", self.summary_topic_value))
+        summary_layout.addWidget(self._summary_pair("Тон", self.summary_tone_value))
+        summary_layout.addWidget(self._summary_pair("Риск эскалации", self.summary_risk_value))
+        summary_layout.addWidget(self._summary_pair("Приоритет", self.summary_priority_value))
+        summary_layout.addWidget(self._summary_pair("Стиль", self.summary_style_value))
+
+        self.summary_signal_chips = AnalyticsChips()
+        summary_layout.addWidget(self.summary_signal_chips)
+        self.summary_details_label = QLabel("Появится после анализа обращения.")
+        self.summary_details_label.setObjectName("Subtle")
+        self.summary_details_label.setWordWrap(True)
+        summary_layout.addWidget(self.summary_details_label)
+
+        self.topic_override_toggle = QPushButton("Исправить тему")
+        self.topic_override_toggle.setObjectName("Ghost")
+        self.topic_override_toggle.clicked.connect(self._toggle_topic_override)
+        summary_layout.addWidget(self.topic_override_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+
+        self.topic_override_combo = QComboBox()
+        self.topic_override_combo.setEditable(True)
+        self.topic_override_combo.addItems(self._available_topics())
+        self.topic_override_save_button = QPushButton("Сохранить тему")
+        self.topic_override_save_button.setObjectName("Tiny")
+        self.topic_override_save_button.clicked.connect(self.save_topic_correction)
+
+        self.topic_override_container = QWidget()
+        override_layout = QHBoxLayout(self.topic_override_container)
+        override_layout.setContentsMargins(0, 0, 0, 0)
+        override_layout.setSpacing(8)
+        override_layout.addWidget(self.topic_override_combo, 1)
+        override_layout.addWidget(self.topic_override_save_button)
+        self.topic_override_container.setVisible(False)
+        summary_layout.addWidget(self.topic_override_container)
+        layout.addWidget(self.summary_card)
+        layout.addStretch(1)
+        return column
+
+    def _build_expert_sidebar(self) -> QWidget:
+        sidebar = QWidget()
+        sidebar.setFixedWidth(270)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(14)
+
+        ocr_card = self._create_panel("OCR preview")
+        ocr_layout = ocr_card.layout()
+        self.expert_image_label = QLabel("Скриншот не добавлен")
+        self.expert_image_label.setObjectName("Hint")
+        self.expert_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.expert_image_label.setMinimumHeight(150)
+        self.expert_image_label.setFrameShape(QFrame.Shape.StyledPanel)
+        self.expert_image_label.setStyleSheet("border-radius: 8px;")
+        ocr_layout.addWidget(self.expert_image_label)
+
+        self.ocr_text = QPlainTextEdit()
+        self.ocr_text.setPlaceholderText("Распознанный текст со скриншота появится здесь.")
+        self.ocr_text.setMinimumHeight(120)
+        self.ocr_text.textChanged.connect(self.update_case_summary)
+        ocr_layout.addWidget(self.ocr_text)
+
+        ocr_actions = QHBoxLayout()
+        self.ocr_feedback_correct_button = QPushButton("OCR верно")
+        self.ocr_feedback_correct_button.setObjectName("Tiny")
+        self.ocr_feedback_correct_button.clicked.connect(self.mark_ocr_correct)
+        self.ocr_feedback_save_button = QPushButton("Сохранить исправленный текст")
+        self.ocr_feedback_save_button.setObjectName("Tiny")
+        self.ocr_feedback_save_button.clicked.connect(self.save_corrected_ocr_text)
+        ocr_actions.addWidget(self.ocr_feedback_correct_button)
+        ocr_actions.addWidget(self.ocr_feedback_save_button)
+        ocr_layout.addLayout(ocr_actions)
+        layout.addWidget(ocr_card)
+        self.ocr_card = ocr_card
+
+        style_card = self._create_panel("Стиль")
+        style_layout = style_card.layout()
+        self.current_style_name = QLabel("Не выбран")
+        self.current_style_name.setObjectName("PanelTitle")
+        self.current_style_tone = QLabel("—")
+        self.current_style_tone.setObjectName("Subtle")
+        style_layout.addWidget(self.current_style_name)
+        style_layout.addWidget(self.current_style_tone)
+        self.current_style_pill = QLabel("Не выбран")
+        self.current_style_pill.setObjectName("InsightChip")
+        style_layout.addWidget(self.current_style_pill, 0, Qt.AlignmentFlag.AlignLeft)
+        style_layout.addStretch(1)
+        layout.addWidget(style_card)
+
+        recent_styles_card = self._create_panel("Последние стили")
+        recent_layout = recent_styles_card.layout()
+        self.recent_styles_labels: list[QLabel] = []
+        for index in range(3):
+            label = QLabel("—")
+            label.setObjectName("RecentStylePrimary" if index == 0 else "Subtle")
+            recent_layout.addWidget(label)
+            self.recent_styles_labels.append(label)
+        self.show_more_styles_button = QPushButton("Показать больше")
+        self.show_more_styles_button.setObjectName("Ghost")
+        self.show_more_styles_button.clicked.connect(self.open_settings)
+        recent_layout.addWidget(self.show_more_styles_button, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(recent_styles_card)
+        self.recent_styles_card = recent_styles_card
+
+        status_card = self._create_panel("Статусы")
+        status_layout = status_card.layout()
+        self.backend_status_value = self._status_row(status_layout, "Backend")
+        self.model_status_value = self._status_row(status_layout, "Модель")
+        self.ocr_status_value = self._status_row(status_layout, "OCR")
+        self.expert_sla_label = QLabel("SLA по этапам появится после подготовки ответа.")
+        self.expert_sla_label.setObjectName("Subtle")
+        self.expert_sla_label.setWordWrap(True)
+        status_layout.addWidget(self.expert_sla_label)
+
+        self.expert_debug_label = QLabel("")
+        self.expert_debug_label.setObjectName("Subtle")
+        self.expert_debug_label.setWordWrap(True)
+        self.expert_debug_label.setVisible(False)
+        status_layout.addWidget(self.expert_debug_label)
+
+        controls_row = QHBoxLayout()
+        self.model_combo = QComboBox()
+        self.model_combo.currentTextChanged.connect(self._model_changed)
+        self.refresh_button = QPushButton("Обновить")
+        self.refresh_button.setObjectName("Ghost")
+        self.refresh_button.clicked.connect(self.refresh_status)
+        controls_row.addWidget(self.model_combo, 1)
+        controls_row.addWidget(self.refresh_button)
+        status_layout.addLayout(controls_row)
+        layout.addWidget(status_card)
+        self.statuses_card = status_card
+        self.detail_card = None
+        return sidebar
+
+    def _build_footer(self) -> QWidget:
+        footer = QWidget()
+        footer.setObjectName("TopBar")
+        layout = QHBoxLayout(footer)
+        layout.setContentsMargins(18, 8, 18, 10)
+        layout.setSpacing(12)
+        self.runtime_note_label = QLabel("Локальная модель: —")
+        self.runtime_note_label.setObjectName("Subtle")
+        self.status_message = QLabel("Готово к локальной работе.")
+        self.status_message.setObjectName("Subtle")
+        self.status_message.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.runtime_note_label, 1)
+        layout.addWidget(self.status_message, 2)
+        return footer
+
+    def _icon_color(self) -> str:
+        return "#111827" if self.settings.values.theme == "light" else "#E5E7EB"
+
+    def _render_icon(self, name: str, size: int = 18, color: str | None = None) -> QIcon:
+        icon_path = Path(__file__).resolve().parents[2] / "assets" / "icons" / f"{name}.svg"
+        svg_text = icon_path.read_text(encoding="utf-8").replace("currentColor", color or self._icon_color())
+        renderer = QSvgRenderer(QByteArray(svg_text.encode("utf-8")))
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _set_button_icon(
+        self,
+        button: QPushButton,
+        icon_name: str,
+        tooltip: str,
+        *,
+        size: int = 18,
+        color: str | None = None,
+        text: str | None = None,
+    ) -> None:
+        button.setIcon(self._render_icon(icon_name, size=size, color=color))
+        button.setIconSize(QSize(size, size))
+        button.setToolTip(tooltip)
+        if text is not None:
+            button.setText(text)
+
+    def _apply_icon_set(self) -> None:
+        color = self._icon_color()
+        white = "#FFFFFF"
+
+        logo_path = Path(__file__).resolve().parents[2] / "assets" / "app_icon.png"
+        if logo_path.exists():
+            self.logo_label.setPixmap(
+                QPixmap(str(logo_path)).scaled(
+                    20,
+                    20,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+
+        self._set_button_icon(self.theme_button, "moon", "Переключить тему", color=color)
+        self._set_button_icon(self.menu_button, "menu", "Открыть меню", color=color)
+
+        for button, icon_name in zip(self.rail_buttons, self.rail_icon_names):
+            self._set_button_icon(button, icon_name, button.toolTip(), color=color, text="")
+
+        self._set_button_icon(self.screenshot_button, "attachment", "Добавить скриншот", color=color, text="Скриншот")
+        self._set_button_icon(self.ocr_only_button, "camera", "OCR со скриншота", color=color, text="OCR со скриншота")
+
+        self._set_button_icon(self.answer_copy_icon, "copy", "Копировать ответ", color=color, text="")
+        self._set_button_icon(self.answer_save_icon, "bookmark", "Сохранить как удачный стиль", color=color, text="")
+        self._set_button_icon(self.answer_like_icon, "thumbs-up", "Ответ удачный", color=color, text="")
+        self._set_button_icon(self.answer_dislike_icon, "thumbs-down", "Нужно исправить ответ", color=color, text="")
+        self._set_button_icon(self.answer_rerun_icon, "refresh", "Сгенерировать заново", color=color, text="")
+
+        self._set_button_icon(self.feedback_positive_button, "thumbs-up", "Отметить ответ как удачный", size=16, color=color, text="")
+        self._set_button_icon(self.feedback_negative_button, "thumbs-down", "Исправить ответ", size=16, color=color, text="")
+        self._set_button_icon(self.primary_action_button, "magic", "Подготовить ответ", size=16, color=white, text="Подготовить ответ  →")
 
     @staticmethod
-    def _wrap_panel(title: str, child: QWidget) -> QFrame:
+    def _create_panel(title: str) -> QFrame:
         frame = QFrame()
         frame.setObjectName("Panel")
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
         label = QLabel(title)
         label.setObjectName("PanelTitle")
-        label.setStyleSheet("font-weight: 700;")
         layout.addWidget(label)
-        layout.addWidget(child, 1)
         return frame
+
+    @staticmethod
+    def _summary_value(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("InsightMetaValue")
+        label.setWordWrap(True)
+        return label
+
+    @staticmethod
+    def _summary_pair(title: str, value_label: QLabel) -> QWidget:
+        row = QWidget()
+        layout = QVBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        title_label = QLabel(title)
+        title_label.setObjectName("Subtle")
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        return row
+
+    @staticmethod
+    def _status_row(layout: QVBoxLayout, title: str) -> QLabel:
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(8)
+        left = QLabel(title)
+        left.setObjectName("Subtle")
+        right = QLabel("—")
+        right.setObjectName("InsightMetaValue")
+        row_layout.addWidget(left)
+        row_layout.addStretch(1)
+        row_layout.addWidget(right)
+        layout.addWidget(row)
+        return right
 
     def _bind_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self.open_image_dialog)
-        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.run_primary_action)
+        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self.prepare_answer)
         QShortcut(QKeySequence("Ctrl+K"), self, activated=self.clear_all)
         QShortcut(QKeySequence("Ctrl+Shift+C"), self, activated=self.copy_reply)
         QShortcut(QKeySequence("Ctrl+,"), self, activated=self.open_settings)
+        QShortcut(QKeySequence("Ctrl+E"), self, activated=lambda: self.expert_toggle.toggle())
 
     def _available_topics(self) -> list[str]:
         topics = [
-            "Р В РЎвЂєР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р’Вµ Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ",
-            "Р В РЎСџР РЋР вЂљР В РЎвЂўР РЋРІР‚В Р В Р’ВµР В Р вЂ¦Р РЋРІР‚С™Р РЋРІР‚в„– / Р В РЎвЂќР РЋР вЂљР В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™ Р В Р вЂ¦Р В Р’В°Р В Р’В»Р В РЎвЂР РЋРІР‚РЋР В Р вЂ¦Р РЋРІР‚в„–Р В РЎВР В РЎвЂ",
-            "Р В РЎСџР РЋР вЂљР В РЎвЂўР РЋРІР‚В Р В Р’ВµР В Р вЂ¦Р РЋРІР‚С™Р РЋРІР‚в„– / Р В РЎвЂќР РЋР вЂљР В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р вЂ¦Р В Р’В°Р РЋР РЏ Р В РЎвЂќР В Р’В°Р РЋР вЂљР РЋРІР‚С™Р В Р’В°",
-            "Р В РЎСџР РЋР вЂљР В РЎвЂўР РЋРІР‚В Р В Р’ВµР В Р вЂ¦Р РЋРІР‚С™Р РЋРІР‚в„– / Р В РЎвЂќР РЋР вЂљР В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™",
-            "Р В РІР‚СњР В Р’ВµР В Р’В±Р В Р’ВµР РЋРІР‚С™Р В РЎвЂўР В Р вЂ Р В Р’В°Р РЋР РЏ Р В РЎвЂќР В Р’В°Р РЋР вЂљР РЋРІР‚С™Р В Р’В° / Р В РЎвЂќР РЋР РЉР РЋРІвЂљВ¬Р В Р’В±Р РЋР РЉР В РЎвЂќ",
-            "Р В РІР‚СњР В Р’ВµР В Р’В±Р В Р’ВµР РЋРІР‚С™Р В РЎвЂўР В Р вЂ Р В Р’В°Р РЋР РЏ Р В РЎвЂќР В Р’В°Р РЋР вЂљР РЋРІР‚С™Р В Р’В° / Р В РЎвЂ”Р В Р’ВµР РЋР вЂљР В Р’ВµР В Р вЂ Р В РЎвЂўР В РўвЂР РЋРІР‚в„– Р В РЎвЂ Р В Р’В»Р В РЎвЂР В РЎВР В РЎвЂР РЋРІР‚С™Р РЋРІР‚в„–",
-            "Р В РІР‚в„ўР В РЎвЂќР В Р’В»Р В Р’В°Р В РўвЂ / Р В РЎвЂ”Р РЋР вЂљР В РЎвЂўР РЋРІР‚В Р В Р’ВµР В Р вЂ¦Р РЋРІР‚С™Р РЋРІР‚в„–",
-            "Р В РІР‚в„ўР В РЎвЂќР В Р’В»Р В Р’В°Р В РўвЂ / Р В РЎвЂ”Р В РЎвЂўР В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р вЂ¦Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ Р В РЎвЂ Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋР вЂљР РЋРІР‚в„–Р РЋРІР‚С™Р В РЎвЂР В Р’Вµ",
-            "Р В РЎСљР В Р’В°Р В РЎвЂќР В РЎвЂўР В РЎвЂ”Р В РЎвЂР РЋРІР‚С™Р В Р’ВµР В Р’В»Р РЋР Р‰Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋР С“Р РЋРІР‚РЋР В Р’ВµР РЋРІР‚С™ / Р В РЎвЂ”Р РЋР вЂљР В РЎвЂўР РЋРІР‚В Р В Р’ВµР В Р вЂ¦Р РЋРІР‚С™Р РЋРІР‚в„–",
+            "Общее обращение",
+            "Проценты / кредит наличными",
+            "Проценты / кредитная карта",
+            "Проценты / кредит",
+            "Дебетовая карта / кэшбэк",
+            "Дебетовая карта / переводы и лимиты",
+            "Вклад / проценты",
+            "Вклад / пополнение и закрытие",
+            "Накопительный счет / проценты",
         ]
         topics.extend(topic for topic, _ in self.case_analyzer.TOPIC_RULES)
-        seen: set[str] = set()
         result: list[str] = []
+        seen: set[str] = set()
         for topic in topics:
             clean = topic.strip()
             key = clean.lower()
-            if not clean or key in seen:
-                continue
-            seen.add(key)
-            result.append(clean)
+            if clean and key not in seen:
+                seen.add(key)
+                result.append(clean)
         return result
 
+    def _model_changed(self, model: str) -> None:
+        if model:
+            self.settings.update(preferred_model=model)
+            self.runtime_note_label.setText(f"Локальная модель: {model}")
+
     def _set_stage_metric(self, key: str, elapsed_ms: float | None) -> None:
-        if key not in self.stage_metrics:
-            return
-        self.stage_metrics[key] = elapsed_ms if elapsed_ms and elapsed_ms > 0 else None
-        self._update_sla_message()
+        if key in self.stage_metrics:
+            self.stage_metrics[key] = elapsed_ms if elapsed_ms and elapsed_ms > 0 else None
+            self._update_sla_message()
 
     def _reset_stage_metrics(self) -> None:
         for key in self.stage_metrics:
@@ -335,44 +736,30 @@ class MainWindow(QMainWindow):
 
     def _update_sla_message(self) -> None:
         if not any(self.stage_metrics.values()):
-            self.sla_message.clear()
+            self.expert_sla_label.setText("SLA по этапам появится после подготовки ответа.")
             return
         parts = [
             f"OCR {self._format_duration(self.stage_metrics['ocr_ms'])}",
-            f"Р В РЎвЂ™Р В Р вЂ¦Р В Р’В°Р В Р’В»Р В РЎвЂР В Р’В· {self._format_duration(self.stage_metrics['analyze_ms'])}",
-            f"Р В Р’В§Р В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќ {self._format_duration(self.stage_metrics['preview_ms'])}",
-            f"Р В РІР‚СљР В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В Р’В°Р РЋРІР‚В Р В РЎвЂР РЋР РЏ {self._format_duration(self.stage_metrics['generate_ms'])}",
+            f"Анализ {self._format_duration(self.stage_metrics['analyze_ms'])}",
+            f"Preview {self._format_duration(self.stage_metrics['preview_ms'])}",
+            f"Генерация {self._format_duration(self.stage_metrics['generate_ms'])}",
         ]
-        self.sla_message.setText("SLA: " + " Р вЂ™Р’В· ".join(parts))
-
-    def _sync_topic_override_controls(self, topic: str | None = None) -> None:
-        has_analysis = self.last_case_analysis is not None
-        self.topic_override_row.setVisible(has_analysis)
-        self.topic_override_combo.setEnabled(has_analysis and not self._busy)
-        self.topic_override_save_button.setEnabled(has_analysis and not self._busy)
-        if not has_analysis:
-            return
-        selected_topic = (topic or self.last_case_analysis.topic).strip()
-        if not selected_topic:
-            return
-        existing_index = self.topic_override_combo.findText(selected_topic)
-        if existing_index < 0:
-            self.topic_override_combo.addItem(selected_topic)
-            existing_index = self.topic_override_combo.findText(selected_topic)
-        self.topic_override_combo.setCurrentIndex(existing_index)
+        self.expert_sla_label.setText("SLA: " + " • ".join(parts))
 
     def refresh_status(self) -> None:
-        self.local_pill.set_state("Р В РІР‚С”Р В РЎвЂўР В РЎвЂќР В Р’В°Р В Р’В»Р РЋР Р‰Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋР вЂљР В Р’ВµР В Р’В¶Р В РЎвЂР В РЎВ", not self.settings.values.network_disabled)
+        self.local_status.set_state("Local", not self.settings.values.network_disabled)
         if self.settings.values.network_disabled:
-            self.local_pill.set_state("Р В Р Р‹Р В Р’ВµР РЋРІР‚С™Р РЋР Р‰ Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР В Р’ВµР В Р вЂ¦Р В Р’В° Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р вЂ¦Р В РЎвЂўР РЋР С“Р РЋРІР‚С™Р РЋР Р‰Р РЋР вЂ№", True)
+            self.local_status.set_state("Offline strict", True)
 
+        ocr_ready = True
         if self.settings.values.processing_mode == "text_only":
-            self.ocr_pill.set_state("OCR Р РЋР С“Р В РЎвЂќР РЋР вЂљР РЋРІР‚в„–Р РЋРІР‚С™", True)
+            self.ocr_status_value.setText("Скрыт")
         elif self.settings.values.use_ocr:
             ocr_status = self.ocr_manager.status()
-            self.ocr_pill.set_state("OCR Р В РЎвЂ“Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В Р вЂ " if ocr_status.ready else "OCR Р В Р вЂ¦Р В Р’Вµ Р В РЎвЂ“Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В Р вЂ ", ocr_status.ready)
+            ocr_ready = ocr_status.ready
+            self.ocr_status_value.setText("Готов" if ocr_status.ready else "Не готов")
         else:
-            self.ocr_pill.set_state("OCR Р В Р вЂ Р РЋРІР‚в„–Р В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР В Р’ВµР В Р вЂ¦", True)
+            self.ocr_status_value.setText("Выключен")
 
         status = self.ai_manager.check_status()
         self.model_combo.blockSignals(True)
@@ -382,102 +769,252 @@ class MainWindow(QMainWindow):
         preferred = self.settings.values.preferred_model
         if preferred and preferred in models:
             self.model_combo.setCurrentText(preferred)
-        elif status.supported_models:
-            self.model_combo.setCurrentText(status.supported_models[0])
-            self.settings.update(preferred_model=status.supported_models[0])
+        elif models:
+            self.model_combo.setCurrentText(models[0])
+            self.settings.update(preferred_model=models[0])
         self.model_combo.blockSignals(False)
 
-        selected_model = self.model_combo.currentText().lower()
-        connected_label = "Qwen Р В РЎвЂ”Р В РЎвЂўР В РўвЂР В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР РЋРІР‚ВР В Р вЂ¦" if "qwen" in selected_model else "Р В РЎС™Р В РЎвЂўР В РўвЂР В Р’ВµР В Р’В»Р РЋР Р‰ Р В РЎвЂ”Р В РЎвЂўР В РўвЂР В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР В Р’ВµР В Р вЂ¦Р В Р’В°"
-        self.model_pill.set_state(connected_label if status.supported_models else "Р В РЎС™Р В РЎвЂўР В РўвЂР В Р’ВµР В Р’В»Р РЋР Р‰ Р В Р вЂ¦Р В Р’Вµ Р В Р вЂ¦Р В Р’В°Р В РІвЂћвЂ“Р В РўвЂР В Р’ВµР В Р вЂ¦Р В Р’В°", bool(status.supported_models))
-        if not status.supported_models:
-            self._set_status(status.message + " Р В Р в‚¬Р РЋР С“Р РЋРІР‚С™Р В Р’В°Р В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂќР В Р’В°: ollama pull qwen2.5vl")
+        model_ready = bool(status.supported_models)
+        self.ready_status.set_state("Ready", model_ready and ocr_ready)
+        self.backend_status_value.setText("Local FastAPI")
+        self.model_status_value.setText(self.model_combo.currentText() or "Не найдена")
+        self.runtime_note_label.setText(
+            f"Локальная модель: {self.model_combo.currentText() or 'не выбрана'}"
+        )
+        if model_ready:
+            self._set_status("Локальный backend и модель готовы к работе.")
         else:
-            self._set_status(status.message)
-        self._refresh_analyze_button_state()
+            self._set_status("Не удалось подготовить модель. Проверьте Ollama или список моделей.")
+            self._set_expert_debug(status.message)
+        self._refresh_primary_action_state()
+
+    def apply_processing_mode(self) -> None:
+        text_only = self.settings.values.processing_mode == "text_only"
+        self.screenshot_button.setEnabled(not text_only)
+        has_image = bool(self.current_image_path)
+        self.remove_screenshot_button.setEnabled(not text_only and has_image)
+        self.remove_screenshot_button.setVisible(not text_only and has_image)
+        self.ocr_card.setVisible(self.settings.values.expert_mode and not text_only)
+        if text_only:
+            self.attachment_label.setText("Режим только текста")
+            self._clear_image_only()
+        else:
+            self._update_attachment_label()
+
+    def _apply_window_settings(self) -> None:
+        flags = self.windowFlags()
+        if self.settings.values.always_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        if self.settings.values.compact_mode:
+            self.resize(1240, 760)
+        self.show()
+
+    def _apply_theme_button_state(self) -> None:
+        if self.settings.values.theme == "light":
+            self.theme_button.setToolTip("Переключить на тёмную тему")
+        else:
+            self.theme_button.setToolTip("Переключить на светлую тему")
+        self._apply_icon_set()
+
+    def _toggle_theme(self) -> None:
+        next_theme = "light" if self.settings.values.theme == "dark" else "dark"
+        self.settings.update(theme=next_theme)
+        app = QApplication.instance()
+        if app:
+            apply_theme(app, next_theme)
+        self._apply_theme_button_state()
+
+    def _expert_toggled(self, enabled: bool) -> None:
+        self._apply_expert_mode(enabled, persist=True)
+
+    def _apply_expert_mode(self, enabled: bool, *, persist: bool) -> None:
+        self.left_rail.setVisible(enabled)
+        self.summary_column.setVisible(enabled)
+        self.expert_sidebar.setVisible(enabled)
+        self.ocr_card.setVisible(enabled and self.settings.values.processing_mode != "text_only")
+        self.statuses_card.setVisible(enabled)
+        self.recent_styles_card.setVisible(enabled)
+        if enabled:
+            self.resize(1320, 820)
+        else:
+            self.resize(1100, 760)
+        if persist and self.settings.values.expert_mode != enabled:
+            self.settings.update(expert_mode=enabled)
+        self.expert_debug_label.setVisible(enabled and bool(self.expert_debug_label.text().strip()))
+
+    def _update_message_counter(self) -> None:
+        count = len(self.customer_text.toPlainText())
+        self.message_count_label.setText(f"{count}/4000")
+
+    def _update_attachment_label(self) -> None:
+        if self.settings.values.processing_mode == "text_only":
+            self.attachment_label.setText("Режим только текста")
+            self.remove_screenshot_button.setVisible(False)
+            return
+        if self.current_image_path:
+            self.attachment_label.setText(f"Скриншот: {self.current_image_path.name}")
+            self.remove_screenshot_button.setVisible(True)
+        else:
+            self.attachment_label.setText("Скриншот не добавлен")
+            self.remove_screenshot_button.setVisible(False)
+
+    def _manual_ocr_only(self) -> None:
+        if self.settings.values.processing_mode == "text_only":
+            QMessageBox.information(self, "Режим только текста", "OCR со скриншота недоступен в режиме только текста.")
+            return
+        if not self.current_image_path:
+            QMessageBox.information(self, "Нет скриншота", "Сначала добавьте скриншот.")
+            return
+        if not self.settings.values.use_ocr:
+            QMessageBox.information(self, "OCR выключен", "Включите OCR в настройках, чтобы распознавать текст со скриншота.")
+            return
+        self._start_ocr()
+
+    def _set_image_preview(self, pixmap) -> None:
+        if pixmap is None or pixmap.isNull():
+            self.expert_image_label.setText("Скриншот не добавлен")
+            self.expert_image_label.setPixmap(QPixmap())
+            return
+        scaled = pixmap.scaled(
+            self.expert_image_label.size() if self.expert_image_label.width() > 10 else self.expert_image_label.maximumSize(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.expert_image_label.setText("")
+        self.expert_image_label.setPixmap(scaled)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self.current_image_path:
+            pixmap = load_pixmap(self.current_image_path)
+            if pixmap is not None:
+                self._set_image_preview(pixmap)
+
+    def dragEnterEvent(self, event) -> None:
+        urls = event.mimeData().urls()
+        if urls and Path(urls[0].toLocalFile()).suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS:
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:
+        urls = event.mimeData().urls()
+        if urls:
+            path = Path(urls[0].toLocalFile())
+            if path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS:
+                self.load_image(path)
+                event.acceptProposedAction()
+                return
+        super().dropEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.matches(QKeySequence.StandardKey.Paste):
+            clipboard = QApplication.clipboard()
+            mime = clipboard.mimeData()
+            if mime.hasImage():
+                if self.settings.values.processing_mode == "text_only":
+                    self._set_status("Скриншот пропущен: сейчас включён режим только текста.")
+                    return
+                image = clipboard.image()
+                self.current_clipboard_image_base64 = qimage_to_base64(image)
+                temp_path = self.settings.data_dir / "clipboard_image.png"
+                temp_path.write_bytes(qimage_to_png_bytes(image))
+                self.load_image(temp_path, from_clipboard=True)
+                self._set_status("Скриншот вставлен из буфера обмена.")
+                return
+        super().keyPressEvent(event)
 
     def open_image_dialog(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
             self,
-            "Р В РІР‚в„ўР РЋРІР‚в„–Р В Р’В±Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™",
+            "Выберите скриншот",
             "",
             "Images (*.png *.jpg *.jpeg *.webp *.bmp)",
         )
         if filename:
             self.load_image(Path(filename))
 
-    def load_image(self, path: Path) -> None:
+    def load_image(self, path: Path, *, from_clipboard: bool = False) -> None:
         if self.settings.values.processing_mode == "text_only":
             QMessageBox.information(
                 self,
-                "Р В Р’В Р В Р’ВµР В Р’В¶Р В РЎвЂР В РЎВ Р РЋРІР‚С™Р В РЎвЂўР В Р’В»Р РЋР Р‰Р В РЎвЂќР В РЎвЂў Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™Р В Р’В°",
-                "Р В Р Р‹Р В Р’ВµР В РІвЂћвЂ“Р РЋРІР‚РЋР В Р’В°Р РЋР С“ Р В Р вЂ Р В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР РЋРІР‚ВР В Р вЂ¦ Р РЋР вЂљР В Р’ВµР В Р’В¶Р В РЎвЂР В РЎВ Р вЂ™Р’В«Р В РЎС›Р В РЎвЂўР В Р’В»Р РЋР Р‰Р В РЎвЂќР В РЎвЂў Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™Р вЂ™Р’В». Р В РІР‚в„ўР В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР вЂљР В Р’ВµР В Р’В¶Р В РЎвЂР В РЎВ Р РЋР С“Р В РЎвЂў Р РЋР С“Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™Р В Р’В°Р В РЎВР В РЎвЂ Р В Р вЂ  Р В Р вЂ¦Р В Р’В°Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР В РЎвЂўР В РІвЂћвЂ“Р В РЎвЂќР В Р’В°Р РЋРІР‚В¦, Р В Р’ВµР РЋР С“Р В Р’В»Р В РЎвЂ Р РЋРІР‚В¦Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В РЎвЂР РЋР С“Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р РЋР Р‰Р В Р’В·Р В РЎвЂўР В Р вЂ Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р В РЎвЂР В Р’В·Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р В Р’В¶Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ.",
+                "Режим только текста",
+                "Сейчас включён режим только текста. Чтобы использовать скриншот, переключите режим в настройках.",
             )
             return
         pixmap = load_pixmap(path)
         if pixmap is None:
-            QMessageBox.warning(self, "Р В РЎСљР В Р’Вµ Р РЋРЎвЂњР В РўвЂР В Р’В°Р В Р’В»Р В РЎвЂўР РЋР С“Р РЋР Р‰ Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂќР РЋР вЂљР РЋРІР‚в„–Р РЋРІР‚С™Р РЋР Р‰ Р В РЎвЂР В Р’В·Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р В Р’В¶Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ", str(path))
+            QMessageBox.warning(self, "Не удалось открыть изображение", str(path))
             return
         self.current_image_path = path
-        self.current_clipboard_image_base64 = None
+        if not from_clipboard:
+            self.current_clipboard_image_base64 = None
         self.last_ocr_raw_text = ""
+        self.last_preview_payload = None
         self.last_generated_raw_response = ""
         self.last_generated_model = ""
         self.last_generated_style_id = None
-        self.last_case_analysis = None
-        self.last_case_source = "Р В РЎвЂєР В Р’В¶Р В РЎвЂР В РўвЂР В Р’В°Р В Р вЂ¦Р В РЎвЂР В Р’Вµ"
-        self._reset_stage_metrics()
+        self._negative_feedback_requested = False
+        self._set_image_preview(pixmap)
         self._set_ocr_feedback_enabled(False)
-        self._set_response_feedback_enabled(False)
-        self._sync_topic_override_controls(None)
-        self.drop_zone.set_pixmap(pixmap)
-        self._set_status(f"Р В Р Р‹Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™ Р В Р’В·Р В Р’В°Р В РЎвЂ“Р РЋР вЂљР РЋРЎвЂњР В Р’В¶Р В Р’ВµР В Р вЂ¦: {path.name}")
-        self._refresh_analyze_button_state()
+        self._refresh_response_actions()
+        self._update_attachment_label()
+        self._set_status(f"Скриншот добавлен: {path.name}")
+        self._refresh_primary_action_state()
 
-    def analyze_screenshot(self) -> None:
+    def _clear_image_only(self) -> None:
+        self.current_image_path = None
+        self.current_clipboard_image_base64 = None
+        self.last_ocr_raw_text = ""
+        self.ocr_text.clear()
+        self.expert_image_label.setText("Скриншот не добавлен")
+        self.expert_image_label.setPixmap(QPixmap())
+        self._update_attachment_label()
+        self._set_ocr_feedback_enabled(False)
+        self._refresh_primary_action_state()
+
+    def prepare_answer(self) -> None:
         customer = self.customer_text.toPlainText().strip()
         ocr = self.ocr_text.toPlainText().strip()
-        text_only = self.settings.values.processing_mode == "text_only"
-
-        if not text_only and self.current_image_path and self.settings.values.use_ocr:
-            self._set_busy(True)
-            worker = OCRWorker(self.ocr_manager, self.current_image_path)
-            worker.finished.connect(self._ocr_finished)
-            worker.failed.connect(self._ocr_failed)
-            worker.finished.connect(lambda *_: self._forget_worker(worker))
-            worker.failed.connect(lambda *_: self._forget_worker(worker))
-            self.workers.append(worker)
-            self.threads.append(start_worker(worker))
-            self._set_status("OCR Р РЋР вЂљР В Р’В°Р РЋР С“Р В РЎвЂ”Р В РЎвЂўР В Р’В·Р В Р вЂ¦Р В Р’В°Р В Р’ВµР РЋРІР‚С™ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™ Р В Р’В»Р В РЎвЂўР В РЎвЂќР В Р’В°Р В Р’В»Р РЋР Р‰Р В Р вЂ¦Р В РЎвЂў...")
+        has_image = bool(self.current_image_path or self.current_clipboard_image_base64) and self.settings.values.processing_mode != "text_only"
+        if not customer and not ocr and not has_image:
+            QMessageBox.information(self, "Нет контекста", "Добавьте сообщение клиента или скриншот, чтобы подготовить ответ.")
             return
 
+        self._autofinalize_after_preview = True
+        self.last_preview_payload = None
+        self.last_generated_raw_response = ""
+        self._negative_feedback_requested = False
+        self.response_text.clear()
+        self._reset_stage_metrics()
+        self._refresh_response_actions()
+
+        if has_image and self.settings.values.use_ocr and not ocr:
+            self._start_ocr()
+            return
         if customer or ocr:
             self._run_backend_analysis(customer, ocr)
             return
+        self._start_final_generation()
 
-        if self.current_image_path and not self.settings.values.use_ocr:
-            QMessageBox.information(self, "OCR Р В Р вЂ Р РЋРІР‚в„–Р В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР В Р’ВµР В Р вЂ¦", "Р В РІР‚в„ўР В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР В РЎвЂР РЋРІР‚С™Р В Р’Вµ OCR Р В Р вЂ  Р В Р вЂ¦Р В Р’В°Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР В РЎвЂўР В РІвЂћвЂ“Р В РЎвЂќР В Р’В°Р РЋРІР‚В¦, Р В Р’ВµР РЋР С“Р В Р’В»Р В РЎвЂ Р РЋРІР‚В¦Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР вЂљР В Р’В°Р РЋР С“Р В РЎвЂ”Р В РЎвЂўР В Р’В·Р В Р вЂ¦Р В Р’В°Р В Р вЂ Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™.")
+    def _start_ocr(self) -> None:
+        if not self.current_image_path:
             return
-
-        if text_only:
-            QMessageBox.information(self, "Р В РЎСљР В Р’ВµР РЋРІР‚С™ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™Р В Р’В°", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ, Р РЋРІР‚РЋР РЋРІР‚С™Р В РЎвЂўР В Р’В±Р РЋРІР‚в„– Р В Р’В·Р В Р’В°Р В РЎвЂ”Р РЋРЎвЂњР РЋР С“Р РЋРІР‚С™Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰ Р В Р’В°Р В Р вЂ¦Р В Р’В°Р В Р’В»Р В РЎвЂР В Р’В· Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ.")
-            return
-
-        QMessageBox.information(self, "Р В РЎСљР В Р’ВµР РЋРІР‚С™ Р В РўвЂР В Р’В°Р В Р вЂ¦Р В Р вЂ¦Р РЋРІР‚в„–Р РЋРІР‚В¦", "Р В РІР‚СњР В РЎвЂўР В Р’В±Р В Р’В°Р В Р вЂ Р РЋР Р‰Р РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ Р В РЎвЂР В Р’В»Р В РЎвЂ Р В Р’В·Р В Р’В°Р В РЎвЂ“Р РЋР вЂљР РЋРЎвЂњР В Р’В·Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™ Р В РЎвЂ”Р В Р’ВµР РЋР вЂљР В Р’ВµР В РўвЂ Р В Р’В°Р В Р вЂ¦Р В Р’В°Р В Р’В»Р В РЎвЂР В Р’В·Р В РЎвЂўР В РЎВ.")
-
-    def run_primary_action(self) -> None:
-        self.pending_topic_hint = None
-        self.pending_knowledge_facts = []
-        self.response_text.clear()
-        self.last_generated_raw_response = ""
-        self.last_generated_model = ""
-        self.last_generated_style_id = None
-        self._set_response_feedback_enabled(False)
-        self.analyze_screenshot()
+        self._set_busy(True, "Распознаю скриншот локально...")
+        worker = OCRWorker(self.ocr_manager, self.current_image_path)
+        worker.finished.connect(self._ocr_finished)
+        worker.failed.connect(self._ocr_failed)
+        worker.finished.connect(lambda *_: self._forget_worker(worker))
+        worker.failed.connect(lambda *_: self._forget_worker(worker))
+        self.workers.append(worker)
+        self.threads.append(start_worker(worker))
 
     def _run_backend_analysis(self, customer_text: str, ocr_text: str) -> None:
         style = self.style_manager.get_style(self.settings.values.selected_style_id)
-        self._set_busy(True)
+        self._set_busy(True, "Анализирую обращение через локальный backend...")
         worker = BackendAnalyzeWorker(
             self.backend_client,
             customer_text=customer_text,
@@ -498,21 +1035,14 @@ class MainWindow(QMainWindow):
         worker.failed.connect(lambda *_: self._forget_worker(worker))
         self.workers.append(worker)
         self.threads.append(start_worker(worker))
-        self._set_status("FastAPI Р В Р’В°Р В Р вЂ¦Р В Р’В°Р В Р’В»Р В РЎвЂР В Р’В·Р В РЎвЂР РЋР вЂљР РЋРЎвЂњР В Р’ВµР РЋРІР‚С™ Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ...")
 
-    def generate_preview(self) -> None:
-        customer = self.customer_text.toPlainText().strip()
-        ocr = self.ocr_text.toPlainText().strip()
-        if not customer and not ocr:
-            QMessageBox.information(self, "Р В РЎСљР В Р’ВµР РЋРІР‚С™ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™Р В Р’В°", "Р В РІР‚СњР В Р’В»Р РЋР РЏ Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќР В Р’В° Р В Р вЂ¦Р РЋРЎвЂњР В Р’В¶Р В Р’ВµР В Р вЂ¦ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™ Р РЋР С“Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ Р В РЎвЂР В Р’В»Р В РЎвЂ OCR-Р В РЎвЂќР В РЎвЂўР В Р вЂ¦Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™.")
-            return
-
+    def _run_hidden_preview(self) -> None:
         style = self.style_manager.get_style(self.settings.values.selected_style_id)
-        self._set_busy(True)
+        self._set_busy(True, "Собираю факты и контекст ответа...")
         worker = BackendPreviewWorker(
             self.backend_client,
-            customer_text=customer,
-            ocr_text=ocr,
+            customer_text=self.customer_text.toPlainText().strip(),
+            ocr_text=self.ocr_text.toPlainText().strip(),
             selected_style=style.name if style else None,
         )
         worker.finished.connect(self._preview_finished)
@@ -521,33 +1051,30 @@ class MainWindow(QMainWindow):
         worker.failed.connect(lambda *_: self._forget_worker(worker))
         self.workers.append(worker)
         self.threads.append(start_worker(worker))
-        self._set_status("FastAPI Р РЋР С“Р В РЎвЂўР В Р’В±Р В РЎвЂР РЋР вЂљР В Р’В°Р В Р’ВµР РЋРІР‚С™ Р В Р’В±Р РЋРІР‚в„–Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р В Р’В°...")
 
-    def generate_reply(
-        self,
-        *,
-        topic_hint: str | None = None,
-        knowledge_facts: list[str] | None = None,
-    ) -> None:
+    def _start_final_generation(self, preview_payload: dict | None = None) -> None:
         customer = self.customer_text.toPlainText().strip()
         ocr = self.ocr_text.toPlainText().strip()
         text_only = self.settings.values.processing_mode == "text_only"
         has_image = bool(self.current_image_path or self.current_clipboard_image_base64) and not text_only
         if not customer and not ocr and not has_image:
-            QMessageBox.information(self, "Р В РЎСљР В Р’ВµР РЋРІР‚С™ Р В РЎвЂќР В РЎвЂўР В Р вЂ¦Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™Р В Р’В°", "Р В РІР‚СњР В РЎвЂўР В Р’В±Р В Р’В°Р В Р вЂ Р РЋР Р‰Р РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ Р В РЎвЂР В Р’В»Р В РЎвЂ Р РЋР С“Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™.")
             return
 
         model = self.model_combo.currentText().strip() or self.settings.values.preferred_model
         style = self.style_manager.get_style(self.settings.values.selected_style_id)
         style_prompt = self.style_manager.build_style_prompt(style)
         quality_rules = self.learning_manager.build_quality_rules(style.profile if style else None)
-        style_id = style.id if style else None
-        style_profile = style.profile if style else None
         image_base64 = None if text_only else self.current_clipboard_image_base64
         if self.current_image_path and not text_only:
             image_base64 = image_path_to_base64(self.current_image_path)
 
-        self._set_busy(True)
+        payload = preview_payload or self.last_preview_payload or {}
+        topic_hint = str(payload.get("topic", "")).strip() or (self.last_case_analysis.topic if self.last_case_analysis else None)
+        knowledge_facts = payload.get("knowledge_facts", []) if isinstance(payload, dict) else []
+        if not isinstance(knowledge_facts, list):
+            knowledge_facts = []
+
+        self._set_busy(True, "Готовлю итоговый ответ локально...")
         worker = GenerateWorker(
             self.ai_manager,
             customer,
@@ -557,28 +1084,32 @@ class MainWindow(QMainWindow):
             model,
             image_base64,
             topic_hint=topic_hint,
-            knowledge_facts=knowledge_facts,
+            knowledge_facts=[str(item) for item in knowledge_facts][:2],
         )
+        style_id = style.id if style else None
+        style_profile = style.profile if style else None
         worker.finished.connect(lambda text, elapsed_ms: self._generation_finished(text, model, style_id, style_profile, elapsed_ms))
         worker.failed.connect(self._worker_failed)
         worker.finished.connect(lambda *_: self._forget_worker(worker))
         worker.failed.connect(lambda *_: self._forget_worker(worker))
         self.workers.append(worker)
         self.threads.append(start_worker(worker))
-        self._set_status("Р В РІР‚С”Р В РЎвЂўР В РЎвЂќР В Р’В°Р В Р’В»Р РЋР Р‰Р В Р вЂ¦Р В Р’В°Р РЋР РЏ Р В РЎВР В РЎвЂўР В РўвЂР В Р’ВµР В Р’В»Р РЋР Р‰ Р В РЎвЂ“Р В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋР вЂљР РЋРЎвЂњР В Р’ВµР РЋРІР‚С™ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™...")
 
     def copy_reply(self) -> None:
-        QApplication.clipboard().setText(self.response_text.toPlainText())
-        self._set_status("Р В РЎвЂєР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™ Р РЋР С“Р В РЎвЂќР В РЎвЂўР В РЎвЂ”Р В РЎвЂР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’В°Р В Р вЂ¦ Р В Р вЂ  Р В Р’В±Р РЋРЎвЂњР РЋРІР‚С›Р В Р’ВµР РЋР вЂљ Р В РЎвЂўР В Р’В±Р В РЎВР В Р’ВµР В Р вЂ¦Р В Р’В°")
+        text = self.response_text.toPlainText().strip()
+        if not text:
+            return
+        QApplication.clipboard().setText(text)
+        self._set_status("Ответ скопирован в буфер обмена.")
 
     def save_reply_to_style(self) -> None:
         text = self.response_text.toPlainText().strip()
         if not text:
-            QMessageBox.information(self, "Р В РЎвЂєР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™ Р В РЎвЂ”Р РЋРЎвЂњР РЋР С“Р РЋРІР‚С™Р В РЎвЂўР В РІвЂћвЂ“", "Р В Р Р‹Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’В°Р В Р’В»Р В Р’В° Р РЋР С“Р В РЎвЂ“Р В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋР вЂљР РЋРЎвЂњР В РІвЂћвЂ“Р РЋРІР‚С™Р В Р’Вµ Р В РЎвЂР В Р’В»Р В РЎвЂ Р В Р вЂ¦Р В Р’В°Р В РЎвЂ”Р В РЎвЂР РЋРІвЂљВ¬Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™.")
+            QMessageBox.information(self, "Ответ пустой", "Сначала подготовьте или отредактируйте ответ.")
             return
         style = self.style_manager.get_style(self.settings.values.selected_style_id)
         if not style:
-            QMessageBox.warning(self, "Р В Р Р‹Р РЋРІР‚С™Р В РЎвЂР В Р’В»Р РЋР Р‰ Р В Р вЂ¦Р В Р’Вµ Р В Р вЂ Р РЋРІР‚в„–Р В Р’В±Р РЋР вЂљР В Р’В°Р В Р вЂ¦", "Р В Р Р‹Р В РЎвЂўР В Р’В·Р В РўвЂР В Р’В°Р В РІвЂћвЂ“Р РЋРІР‚С™Р В Р’Вµ Р В РЎвЂР В Р’В»Р В РЎвЂ Р В Р вЂ Р РЋРІР‚в„–Р В Р’В±Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р РЋРІР‚С™Р В РЎвЂР В Р’В»Р РЋР Р‰ Р В Р вЂ  Р В Р вЂ¦Р В Р’В°Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР В РЎвЂўР В РІвЂћвЂ“Р В РЎвЂќР В Р’В°Р РЋРІР‚В¦.")
+            QMessageBox.warning(self, "Стиль не выбран", "Создайте или выберите стиль в настройках.")
             return
         try:
             updated = self.style_manager.append_example(style.id, text)
@@ -590,12 +1121,14 @@ class MainWindow(QMainWindow):
                     self.customer_text.toPlainText(),
                     self.ocr_text.toPlainText(),
                     style_profile=updated.profile,
+                    reply_style_label=updated.name,
                 ).topic,
             )
             self.settings.update(selected_style_id=updated.id)
-            self._set_status(f"Р В РЎвЂєР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™ Р РЋР С“Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р РЋРІР‚ВР В Р вЂ¦ Р В Р вЂ  Р РЋР С“Р РЋРІР‚С™Р В РЎвЂР В Р’В»Р РЋР Р‰ Р В РЎвЂ Р РЋРЎвЂњР РЋР С“Р В РЎвЂР В Р’В»Р В РЎвЂР В Р’В» Р В РЎвЂќР В РЎвЂўР В Р вЂ¦Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™: {updated.name}")
+            self._refresh_style_summary()
+            self._set_status(f"Ответ сохранён в стиль: {updated.name}")
         except Exception as exc:
-            QMessageBox.warning(self, "Р В РЎСљР В Р’Вµ Р РЋРЎвЂњР В РўвЂР В Р’В°Р В Р’В»Р В РЎвЂўР РЋР С“Р РЋР Р‰ Р РЋР С“Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰ Р В Р вЂ  Р РЋР С“Р РЋРІР‚С™Р В РЎвЂР В Р’В»Р РЋР Р‰", str(exc))
+            QMessageBox.warning(self, "Не удалось сохранить в стиль", str(exc))
 
     def clear_all(self) -> None:
         self.customer_text.clear()
@@ -608,14 +1141,15 @@ class MainWindow(QMainWindow):
         self.last_generated_model = ""
         self.last_generated_style_id = None
         self.last_case_analysis = None
-        self.last_case_source = "Р В РЎвЂєР В Р’В¶Р В РЎвЂР В РўвЂР В Р’В°Р В Р вЂ¦Р В РЎвЂР В Р’Вµ"
+        self.last_case_source = "Ожидание"
+        self.last_preview_payload = None
+        self._negative_feedback_requested = False
         self._reset_stage_metrics()
         self._set_ocr_feedback_enabled(False)
-        self._set_response_feedback_enabled(False)
-        self._sync_topic_override_controls(None)
-        self.drop_zone.set_pixmap(None)
-        self._set_status("Р В РЎвЂєР РЋРІР‚РЋР В РЎвЂР РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂў")
-        self._refresh_analyze_button_state()
+        self._refresh_response_actions()
+        self._show_empty_summary()
+        self._clear_image_only()
+        self._set_status("Экран очищен.")
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(
@@ -629,64 +1163,42 @@ class MainWindow(QMainWindow):
         dialog.settingsChanged.connect(self._settings_changed)
         dialog.exec()
 
-    def keyPressEvent(self, event) -> None:
-        if event.matches(QKeySequence.StandardKey.Paste):
-            clipboard = QApplication.clipboard()
-            mime = clipboard.mimeData()
-            if mime.hasImage():
-                if self.settings.values.processing_mode == "text_only":
-                    self._set_status("Р В Р Р‹Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™ Р В Р вЂ¦Р В Р’Вµ Р В Р вЂ Р РЋР С“Р РЋРІР‚С™Р В Р’В°Р В Р вЂ Р В Р’В»Р В Р’ВµР В Р вЂ¦: Р В Р вЂ Р В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР РЋРІР‚ВР В Р вЂ¦ Р РЋР вЂљР В Р’ВµР В Р’В¶Р В РЎвЂР В РЎВ Р вЂ™Р’В«Р В РЎС›Р В РЎвЂўР В Р’В»Р РЋР Р‰Р В РЎвЂќР В РЎвЂў Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™Р вЂ™Р’В»")
-                    return
-                image = clipboard.image()
-                self.current_clipboard_image_base64 = qimage_to_base64(image)
-                temp_path = self.settings.data_dir / "clipboard_image.png"
-                temp_path.write_bytes(qimage_to_png_bytes(image))
-                self.current_image_path = temp_path
-                self.last_ocr_raw_text = ""
-                self.last_generated_raw_response = ""
-                self.last_generated_model = ""
-                self.last_generated_style_id = None
-                self.last_case_analysis = None
-                self.last_case_source = "Р В РЎвЂєР В Р’В¶Р В РЎвЂР В РўвЂР В Р’В°Р В Р вЂ¦Р В РЎвЂР В Р’Вµ"
-                self._reset_stage_metrics()
-                self._set_ocr_feedback_enabled(False)
-                self._set_response_feedback_enabled(False)
-                self._sync_topic_override_controls(None)
-                self.drop_zone.set_pixmap(load_pixmap(temp_path))
-                self._set_status("Р В Р Р‹Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™ Р В Р вЂ Р РЋР С“Р РЋРІР‚С™Р В Р’В°Р В Р вЂ Р В Р’В»Р В Р’ВµР В Р вЂ¦ Р В РЎвЂР В Р’В· Р В Р’В±Р РЋРЎвЂњР РЋРІР‚С›Р В Р’ВµР РЋР вЂљР В Р’В° Р В РЎвЂўР В Р’В±Р В РЎВР В Р’ВµР В Р вЂ¦Р В Р’В°")
-                self._refresh_analyze_button_state()
-                return
-        super().keyPressEvent(event)
-
     def _ocr_finished(self, text: str, elapsed_ms: float) -> None:
         self._set_stage_metric("ocr_ms", elapsed_ms)
         self.last_ocr_raw_text = text or ""
         learned = self.learning_manager.apply_ocr_memory(text or "")
         self.ocr_text.setPlainText(learned.text)
         self._set_ocr_feedback_enabled(bool(text))
-        if not text:
-            self._set_busy(False)
-            self._set_status(f"OCR Р В Р’В·Р В Р’В°Р В Р вЂ Р В Р’ВµР РЋР вЂљР РЋРІвЂљВ¬Р В Р’ВµР В Р вЂ¦, Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™ Р В Р вЂ¦Р В Р’Вµ Р В Р вЂ¦Р В Р’В°Р В РІвЂћвЂ“Р В РўвЂР В Р’ВµР В Р вЂ¦ Р вЂ™Р’В· {self._format_duration(elapsed_ms)}")
-        elif learned.replacements:
-            preview = ", ".join(f"{source} -> {target}" for source, target in learned.replacements[:3])
-            self._set_status(f"OCR Р В Р’В·Р В Р’В°Р В Р вЂ Р В Р’ВµР РЋР вЂљР РЋРІвЂљВ¬Р В Р’ВµР В Р вЂ¦ Р вЂ™Р’В· {self._format_duration(elapsed_ms)} Р вЂ™Р’В· Р В Р’В°Р В Р вЂ Р РЋРІР‚С™Р В РЎвЂўР В РЎвЂќР В РЎвЂўР РЋР вЂљР РЋР вЂљР В Р’ВµР В РЎвЂќР РЋРІР‚В Р В РЎвЂР РЋР РЏ: {preview}")
-            self._set_busy(False)
-            self._run_backend_analysis(self.customer_text.toPlainText().strip(), learned.text)
+        customer = self.customer_text.toPlainText().strip()
+        if customer or learned.text:
+            self._run_backend_analysis(customer, learned.text)
         else:
-            self._set_status(f"OCR Р В Р’В·Р В Р’В°Р В Р вЂ Р В Р’ВµР РЋР вЂљР РЋРІвЂљВ¬Р В Р’ВµР В Р вЂ¦ Р вЂ™Р’В· {self._format_duration(elapsed_ms)}")
+            self._set_status(f"OCR завершён • {self._format_duration(elapsed_ms)}")
             self._set_busy(False)
-            self._run_backend_analysis(self.customer_text.toPlainText().strip(), learned.text)
+            self._start_final_generation()
 
     def _ocr_failed(self, message: str, elapsed_ms: float) -> None:
         self._set_stage_metric("ocr_ms", elapsed_ms)
+        self._set_expert_debug(message)
+        if self._autofinalize_after_preview:
+            self._set_status("Не удалось распознать скриншот. Пытаюсь подготовить ответ по доступному контексту.")
+            customer = self.customer_text.toPlainText().strip()
+            ocr = self.ocr_text.toPlainText().strip()
+            if customer or ocr:
+                self._run_backend_analysis(customer, ocr)
+            else:
+                self._start_final_generation()
+            return
         self._worker_failed(message)
 
     def _backend_analysis_finished(self, payload: dict, elapsed_ms: float) -> None:
         self._set_stage_metric("analyze_ms", elapsed_ms)
         self._show_analysis_payload(payload, "FastAPI")
-        self._set_status(f"FastAPI проверил тему обращения · {self._format_duration(elapsed_ms)}. Уточняю локальные факты...")
+        if self._autofinalize_after_preview:
+            self._run_hidden_preview()
+            return
         self._set_busy(False)
-        self.generate_preview()
+        self._set_status(f"Аналитика обновлена • {self._format_duration(elapsed_ms)}")
 
     def _backend_analysis_failed(
         self,
@@ -697,42 +1209,40 @@ class MainWindow(QMainWindow):
         style_profile: dict | None,
     ) -> None:
         self._set_stage_metric("analyze_ms", elapsed_ms)
+        style = self.style_manager.get_style(self.settings.values.selected_style_id)
         analysis = self.case_analyzer.analyze(
             customer_text,
             ocr_text,
             style_profile=style_profile,
+            reply_style_label=style.name if style else None,
         )
-        self._show_case_analysis(analysis, "Fallback")
-        self._set_status(f"{message} Продолжаю по локальному анализу без FastAPI.")
+        self._show_case_analysis(analysis, "Локально")
+        self._set_expert_debug(message)
+        if self._autofinalize_after_preview:
+            self._set_status("FastAPI недоступен. Продолжаю по локальному анализу.")
+            self._start_final_generation()
+            return
         self._set_busy(False)
-        self.generate_reply(topic_hint=analysis.topic, knowledge_facts=[])
+        self._set_status("FastAPI недоступен. Показан локальный анализ.")
 
     def _preview_finished(self, payload: dict, elapsed_ms: float) -> None:
         self._set_stage_metric("preview_ms", elapsed_ms)
-        topic = str(payload.get("topic", self.last_case_analysis.topic if self.last_case_analysis else "Общее обращение")).strip()
-        knowledge_facts = payload.get("knowledge_facts", [])
-        if not isinstance(knowledge_facts, list):
-            knowledge_facts = []
-        knowledge_facts = [str(item).strip() for item in knowledge_facts if str(item).strip()]
-        self.pending_topic_hint = topic
-        self.pending_knowledge_facts = knowledge_facts
+        self.last_preview_payload = payload
         self._show_analysis_payload(payload, "FastAPI")
-        knowledge_articles = payload.get("knowledge_articles", [])
-        if not isinstance(knowledge_articles, list):
-            knowledge_articles = []
-        knowledge_suffix = f" · факты: {len(knowledge_articles)}" if knowledge_articles else ""
+        if self._autofinalize_after_preview:
+            self._start_final_generation(payload)
+            return
         self._set_busy(False)
-        self._set_status(
-            f"FastAPI проверил факты · {self._format_duration(elapsed_ms)} · тема: {topic}{knowledge_suffix}. Локальная модель готовит итоговый ответ..."
-        )
-        self.generate_reply(topic_hint=topic, knowledge_facts=knowledge_facts)
+        self._set_status(f"Контекст ответа обновлён • {self._format_duration(elapsed_ms)}")
 
     def _preview_failed(self, message: str, elapsed_ms: float) -> None:
         self._set_stage_metric("preview_ms", elapsed_ms)
-        fallback_topic = self.last_case_analysis.topic if self.last_case_analysis else None
-        self._set_busy(False)
-        self._set_status(f"{message} Генерирую ответ без локальной базы знаний.")
-        self.generate_reply(topic_hint=fallback_topic, knowledge_facts=[])
+        self._set_expert_debug(message)
+        if self._autofinalize_after_preview:
+            self._set_status("Не удалось усилить ответ локальными знаниями. Готовлю ответ по основному контексту.")
+            self._start_final_generation()
+            return
+        self._worker_failed(message)
 
     def _generation_finished(
         self,
@@ -748,11 +1258,14 @@ class MainWindow(QMainWindow):
             self.last_generated_raw_response = text
             self.last_generated_model = model
             self.last_generated_style_id = style_id
-            self._set_response_feedback_enabled(bool(text.strip()))
+            self._refresh_response_actions()
+
+            selected_style = self.style_manager.get_style(style_id) if style_id else None
             analysis = self.case_analyzer.analyze(
                 self.customer_text.toPlainText(),
                 self.ocr_text.toPlainText(),
                 style_profile=style_profile,
+                reply_style_label=selected_style.name if selected_style else None,
             )
             self.database.execute(
                 """
@@ -777,64 +1290,100 @@ class MainWindow(QMainWindow):
                     int(elapsed_ms),
                 ),
             )
-            self._show_case_analysis(analysis, "Р В РІР‚С”Р В РЎвЂўР В РЎвЂќР В Р’В°Р В Р’В»Р РЋР Р‰Р В Р вЂ¦Р В РЎвЂў")
-            self._set_status(f"Р В РЎвЂєР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™ Р РЋР С“Р В РЎвЂ“Р В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’В°Р В Р вЂ¦ Р В Р’В»Р В РЎвЂўР В РЎвЂќР В Р’В°Р В Р’В»Р РЋР Р‰Р В Р вЂ¦Р В РЎвЂў Р вЂ™Р’В· SLA {self._format_duration(elapsed_ms)}")
+            self._show_case_analysis(analysis, "Локально")
+            self._set_status(f"Ответ подготовлен локально • {self._format_duration(elapsed_ms)}")
         except Exception as exc:
-            QMessageBox.warning(self, "Р В РЎвЂєР РЋРІвЂљВ¬Р В РЎвЂР В Р’В±Р В РЎвЂќР В Р’В° Р В РЎвЂ”Р В РЎвЂўР РЋР С“Р В Р’В»Р В Р’Вµ Р В РЎвЂ“Р В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В Р’В°Р РЋРІР‚В Р В РЎвЂР В РЎвЂ", str(exc))
-            self._set_status(f"Р В РЎвЂєР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™ Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р РЋРЎвЂњР РЋРІР‚РЋР В Р’ВµР В Р вЂ¦, Р В Р вЂ¦Р В РЎвЂў Р В Р вЂ¦Р В Р’Вµ Р РЋРЎвЂњР В РўвЂР В Р’В°Р В Р’В»Р В РЎвЂўР РЋР С“Р РЋР Р‰ Р РЋР С“Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰ Р В Р’В°Р В Р вЂ¦Р В Р’В°Р В Р’В»Р В РЎвЂР РЋРІР‚С™Р В РЎвЂР В РЎвЂќР РЋРЎвЂњ: {exc}")
+            QMessageBox.warning(self, "Ошибка после генерации", str(exc))
+            self._set_status("Ответ получен, но не удалось сохранить аналитику.")
+            self._set_expert_debug(str(exc))
         finally:
+            self._autofinalize_after_preview = False
             self._set_busy(False)
 
     def _worker_failed(self, message: str) -> None:
+        self._autofinalize_after_preview = False
         self._set_busy(False)
-        QMessageBox.warning(self, "Р В РЎвЂєР РЋРІвЂљВ¬Р В РЎвЂР В Р’В±Р В РЎвЂќР В Р’В°", message)
-        self._set_status(message)
+        self._set_expert_debug(message)
+        friendly = "Не удалось подготовить ответ. Проверьте локальную модель или backend."
+        QMessageBox.warning(self, "Ошибка", friendly)
+        self._set_status(friendly)
 
-    def _set_busy(self, busy: bool) -> None:
+    def _set_busy(self, busy: bool, message: str | None = None) -> None:
         self._busy = busy
-        for button in [self.load_button, self.preview_button, self.generate_button, self.save_to_style_button, self.clear_button]:
-            button.setEnabled(not busy)
-        self._refresh_analyze_button_state()
+        self.primary_action_button.setEnabled(not busy and self._has_context())
+        self.clear_button.setEnabled(not busy)
+        self.screenshot_button.setEnabled(not busy and self.settings.values.processing_mode != "text_only")
+        self.remove_screenshot_button.setEnabled(not busy and bool(self.current_image_path))
+        self.theme_button.setEnabled(not busy)
+        self.expert_toggle.setEnabled(not busy)
         self.refresh_button.setEnabled(not busy)
-        self._sync_topic_override_controls()
-
-        has_ocr_feedback = bool(self.last_ocr_raw_text)
-        has_response_feedback = bool(self.last_generated_raw_response)
-        self.ocr_feedback_correct_button.setEnabled(not busy and has_ocr_feedback)
-        self.ocr_feedback_save_button.setEnabled(not busy and has_ocr_feedback)
-        self.response_feedback_correct_button.setEnabled(not busy and has_response_feedback)
-        self.response_feedback_save_button.setEnabled(not busy and has_response_feedback)
+        self.model_combo.setEnabled(not busy)
+        self.topic_override_toggle.setEnabled(not busy and self.last_case_analysis is not None)
+        self.topic_override_combo.setEnabled(not busy and self.last_case_analysis is not None)
+        self.topic_override_save_button.setEnabled(not busy and self.last_case_analysis is not None)
+        if busy:
+            self.primary_action_button.setText("Готовлю ответ…")
+        else:
+            self.primary_action_button.setText("Подготовить ответ  →")
+            self.primary_action_button.setIcon(self._render_icon("magic", size=16, color="#FFFFFF"))
+            self.primary_action_button.setIconSize(QSize(16, 16))
+        self._refresh_response_actions()
+        self._set_ocr_feedback_enabled(bool(self.last_ocr_raw_text))
+        if message:
+            self._set_status(message)
 
     def _set_ocr_feedback_enabled(self, enabled: bool) -> None:
-        self.ocr_feedback_correct_button.setEnabled(enabled)
-        self.ocr_feedback_save_button.setEnabled(enabled)
-        self.ocr_feedback_correct_button.setVisible(enabled)
-        self.ocr_feedback_save_button.setVisible(enabled)
+        visible = enabled and self.settings.values.expert_mode
+        self.ocr_feedback_correct_button.setVisible(visible)
+        self.ocr_feedback_save_button.setVisible(visible)
+        self.ocr_feedback_correct_button.setEnabled(visible and not self._busy)
+        self.ocr_feedback_save_button.setEnabled(visible and not self._busy)
 
-    def _set_response_feedback_enabled(self, enabled: bool) -> None:
-        self.response_feedback_correct_button.setEnabled(enabled)
-        self.response_feedback_save_button.setEnabled(enabled)
-        self.response_feedback_correct_button.setVisible(enabled)
-        self.response_feedback_save_button.setVisible(enabled)
+    def _refresh_response_actions(self) -> None:
+        has_response = bool(self.response_text.toPlainText().strip())
+        has_generated = bool(self.last_generated_raw_response)
+        self.copy_button.setEnabled(has_response and not self._busy)
+        self.save_to_style_button.setEnabled(has_response and not self._busy)
+        self.feedback_positive_button.setEnabled(has_generated and not self._busy)
+        self.feedback_negative_button.setEnabled(has_generated and not self._busy)
+        self.response_feedback_save_button.setVisible(self._negative_feedback_requested and has_generated)
+        self.response_feedback_save_button.setEnabled(self._negative_feedback_requested and has_generated and not self._busy)
+        for button in [
+            self.answer_copy_icon,
+            self.answer_save_icon,
+            self.answer_like_icon,
+            self.answer_dislike_icon,
+            self.answer_rerun_icon,
+        ]:
+            button.setEnabled((has_response or button is self.answer_rerun_icon) and not self._busy)
+
+    def _toggle_negative_feedback(self) -> None:
+        if not self.last_generated_raw_response:
+            return
+        self._negative_feedback_requested = not self._negative_feedback_requested
+        self._refresh_response_actions()
+        if self._negative_feedback_requested:
+            self.response_text.setFocus()
+            self._set_status("Исправьте текст ответа и сохраните исправленную версию.")
 
     def mark_ocr_correct(self) -> None:
         text = self.ocr_text.toPlainText().strip()
         if not text:
-            QMessageBox.information(self, "Р В РЎСљР В Р’ВµР РЋРІР‚С™ OCR-Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™Р В Р’В°", "Р В Р Р‹Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’В°Р В Р’В»Р В Р’В° Р РЋР вЂљР В Р’В°Р РЋР С“Р В РЎвЂ”Р В РЎвЂўР В Р’В·Р В Р вЂ¦Р В Р’В°Р В РІвЂћвЂ“Р РЋРІР‚С™Р В Р’Вµ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™ Р РЋР С“Р В РЎвЂў Р РЋР С“Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™Р В Р’В°.")
+            QMessageBox.information(self, "Нет OCR-текста", "Сначала распознайте текст со скриншота.")
             return
         self._save_ocr_feedback("correct", text)
-        self._set_status("OCR Р В РЎвЂўР РЋРІР‚С™Р В РЎВР В Р’ВµР РЋРІР‚РЋР В Р’ВµР В Р вЂ¦ Р В РЎвЂќР В Р’В°Р В РЎвЂќ Р В РЎвЂќР В РЎвЂўР РЋР вЂљР РЋР вЂљР В Р’ВµР В РЎвЂќР РЋРІР‚С™Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“")
+        self._set_status("OCR отмечен как корректный.")
 
     def save_corrected_ocr_text(self) -> None:
         corrected_text = self.ocr_text.toPlainText().strip()
         if not corrected_text:
-            QMessageBox.information(self, "Р В РЎСљР В Р’ВµР РЋРІР‚С™ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™Р В Р’В°", "Р В Р’ВР РЋР С“Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р РЋР Р‰Р РЋРІР‚С™Р В Р’Вµ OCR-Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™ Р В РЎвЂР В Р’В»Р В РЎвЂ Р РЋР С“Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’В°Р В Р’В»Р В Р’В° Р В Р вЂ Р РЋРІР‚в„–Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р вЂ¦Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР вЂљР В Р’В°Р РЋР С“Р В РЎвЂ”Р В РЎвЂўР В Р’В·Р В Р вЂ¦Р В Р’В°Р В Р вЂ Р В Р’В°Р В Р вЂ¦Р В РЎвЂР В Р’Вµ.")
+            QMessageBox.information(self, "Нет текста", "Сначала исправьте OCR-текст.")
             return
         if not self.last_ocr_raw_text:
-            QMessageBox.information(self, "Р В РЎСљР В Р’ВµР РЋРІР‚С™ Р В РЎвЂР РЋР С“Р РЋРІР‚В¦Р В РЎвЂўР В РўвЂР В Р вЂ¦Р В РЎвЂўР В РЎвЂ“Р В РЎвЂў OCR", "Р В Р Р‹Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’В°Р В Р’В»Р В Р’В° Р В Р вЂ Р РЋРІР‚в„–Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р вЂ¦Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ OCR, Р В Р’В° Р В РЎвЂ”Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В РЎВ Р РЋР С“Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В РЎвЂР РЋР С“Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р В Р’В»Р В Р’ВµР В Р вЂ¦Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™.")
+            QMessageBox.information(self, "Нет исходного OCR", "Сначала выполните OCR, затем сохраните исправленный текст.")
             return
         self._save_ocr_feedback("corrected", corrected_text)
-        self._set_status("Р В Р’ВР РЋР С“Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р В Р’В»Р В Р’ВµР В Р вЂ¦Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ OCR-Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™ Р РЋР С“Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р РЋРІР‚ВР В Р вЂ¦")
+        self._set_status("Исправленный OCR-текст сохранён.")
 
     def _save_ocr_feedback(self, verdict: str, corrected_text: str) -> None:
         self.database.execute(
@@ -854,26 +1403,30 @@ class MainWindow(QMainWindow):
     def mark_response_correct(self) -> None:
         text = self.response_text.toPlainText().strip()
         if not text or not self.last_generated_raw_response:
-            QMessageBox.information(self, "Р В РЎСљР В Р’ВµР РЋРІР‚С™ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р В Р’В°", "Р В Р Р‹Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’В°Р В Р’В»Р В Р’В° Р РЋР С“Р В РЎвЂ“Р В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋР вЂљР РЋРЎвЂњР В РІвЂћвЂ“Р РЋРІР‚С™Р В Р’Вµ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™.")
+            QMessageBox.information(self, "Нет ответа", "Сначала подготовьте ответ.")
             return
         self._save_response_feedback("correct", text)
         learned = self._auto_learn_from_response(text, store_example=False)
+        self._negative_feedback_requested = False
+        self._refresh_response_actions()
         if learned:
-            self._set_status(f"Р В РЎвЂєР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™ Р В РЎвЂўР РЋРІР‚С™Р В РЎВР В Р’ВµР РЋРІР‚РЋР В Р’ВµР В Р вЂ¦ Р В РЎвЂќР В Р’В°Р В РЎвЂќ Р РЋРЎвЂњР В РўвЂР В Р’В°Р РЋРІР‚РЋР В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В РЎвЂ Р РЋРЎвЂњР РЋР С“Р В РЎвЂР В Р’В»Р В РЎвЂР В Р’В» Р РЋР С“Р РЋРІР‚С™Р В РЎвЂР В Р’В»Р РЋР Р‰: {learned.name}")
+            self._set_status(f"Ответ подтверждён и усилил стиль: {learned.name}")
         else:
-            self._set_status("Р В РЎвЂєР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™ Р В РЎвЂўР РЋРІР‚С™Р В РЎВР В Р’ВµР РЋРІР‚РЋР В Р’ВµР В Р вЂ¦ Р В РЎвЂќР В Р’В°Р В РЎвЂќ Р РЋРЎвЂњР В РўвЂР В Р’В°Р РЋРІР‚РЋР В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“")
+            self._set_status("Ответ подтверждён.")
 
     def save_corrected_response(self) -> None:
         corrected_text = self.response_text.toPlainText().strip()
         if not corrected_text or not self.last_generated_raw_response:
-            QMessageBox.information(self, "Р В РЎСљР В Р’ВµР РЋРІР‚С™ Р В РЎвЂР РЋР С“Р РЋРІР‚В¦Р В РЎвЂўР В РўвЂР В Р вЂ¦Р В РЎвЂўР В РЎвЂ“Р В РЎвЂў Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р В Р’В°", "Р В Р Р‹Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’В°Р В Р’В»Р В Р’В° Р РЋР С“Р В РЎвЂ“Р В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋР вЂљР РЋРЎвЂњР В РІвЂћвЂ“Р РЋРІР‚С™Р В Р’Вµ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™, Р В Р’В·Р В Р’В°Р РЋРІР‚С™Р В Р’ВµР В РЎВ Р В РЎвЂ”Р РЋР вЂљР В РЎвЂ Р В Р вЂ¦Р В Р’ВµР В РЎвЂўР В Р’В±Р РЋРІР‚В¦Р В РЎвЂўР В РўвЂР В РЎвЂР В РЎВР В РЎвЂўР РЋР С“Р РЋРІР‚С™Р В РЎвЂ Р В РЎвЂР РЋР С“Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р РЋР Р‰Р РЋРІР‚С™Р В Р’Вµ Р В Р’ВµР В РЎвЂ“Р В РЎвЂў.")
+            QMessageBox.information(self, "Нет исходного ответа", "Сначала подготовьте ответ, затем исправьте его при необходимости.")
             return
         self._save_response_feedback("corrected", corrected_text)
         learned = self._auto_learn_from_response(corrected_text, store_example=True)
+        self._negative_feedback_requested = False
+        self._refresh_response_actions()
         if learned:
-            self._set_status(f"Р В Р’ВР РЋР С“Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р В Р’В»Р В Р’ВµР В Р вЂ¦Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™ Р РЋР С“Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р РЋРІР‚ВР В Р вЂ¦ Р В РЎвЂ Р РЋРЎвЂњР РЋР С“Р В РЎвЂР В Р’В»Р В РЎвЂР В Р’В» Р РЋР С“Р РЋРІР‚С™Р В РЎвЂР В Р’В»Р РЋР Р‰: {learned.name}")
+            self._set_status(f"Исправленный ответ сохранён и усилил стиль: {learned.name}")
         else:
-            self._set_status("Р В Р’ВР РЋР С“Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р В Р’В»Р В Р’ВµР В Р вЂ¦Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™ Р РЋР С“Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р РЋРІР‚ВР В Р вЂ¦ Р В Р вЂ  Р В РЎвЂ”Р В Р’В°Р В РЎВР РЋР РЏР РЋРІР‚С™Р РЋР Р‰ Р В РЎвЂќР В Р’В°Р РЋРІР‚РЋР В Р’ВµР РЋР С“Р РЋРІР‚С™Р В Р вЂ Р В Р’В°")
+            self._set_status("Исправленный ответ сохранён.")
 
     def _save_response_feedback(self, verdict: str, corrected_response: str) -> None:
         self.database.execute(
@@ -906,6 +1459,7 @@ class MainWindow(QMainWindow):
             self.customer_text.toPlainText(),
             self.ocr_text.toPlainText(),
             style_profile=style.profile,
+            reply_style_label=style.name,
         )
         updated = self.style_manager.learn_from_confirmed_interaction(
             style_id,
@@ -915,27 +1469,29 @@ class MainWindow(QMainWindow):
             store_example=store_example,
         )
         self.settings.update(selected_style_id=updated.id)
+        self._refresh_style_summary()
         return updated
+
+    def _toggle_topic_override(self) -> None:
+        if not self.last_case_analysis:
+            return
+        visible = not self.topic_override_container.isVisible()
+        self.topic_override_container.setVisible(visible)
+        if visible:
+            self.topic_override_combo.setFocus()
 
     def save_topic_correction(self) -> None:
         if not self.last_case_analysis:
-            QMessageBox.information(self, "Р В РЎСљР В Р’ВµР РЋРІР‚С™ Р В Р’В°Р В Р вЂ¦Р В Р’В°Р В Р’В»Р В РЎвЂР В Р’В·Р В Р’В°", "Р В Р Р‹Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’В°Р В Р’В»Р В Р’В° Р В Р вЂ Р РЋРІР‚в„–Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р вЂ¦Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В Р’В°Р В Р вЂ¦Р В Р’В°Р В Р’В»Р В РЎвЂР В Р’В· Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ.")
+            QMessageBox.information(self, "Нет анализа", "Сначала выполните анализ обращения.")
             return
-        corrected_topic = " ".join(self.topic_override_combo.currentText().split()).strip()
+        corrected_topic = self.topic_override_combo.currentText().strip()
         if not corrected_topic:
-            QMessageBox.information(self, "Р В РЎСљР В Р’ВµР РЋРІР‚С™ Р РЋРІР‚С™Р В Р’ВµР В РЎВР РЋРІР‚в„–", "Р В РІР‚в„ўР РЋРІР‚в„–Р В Р’В±Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋРІР‚С™Р В Р’ВµР В РЎВР РЋРЎвЂњ Р В РЎвЂР В Р’В· Р РЋР С“Р В РЎвЂ”Р В РЎвЂР РЋР С“Р В РЎвЂќР В Р’В°.")
+            QMessageBox.information(self, "Нет темы", "Введите или выберите тему.")
             return
         style = self.style_manager.get_style(self.settings.values.selected_style_id)
         if not style:
-            QMessageBox.warning(self, "Р В Р Р‹Р РЋРІР‚С™Р В РЎвЂР В Р’В»Р РЋР Р‰ Р В Р вЂ¦Р В Р’Вµ Р В Р вЂ Р РЋРІР‚в„–Р В Р’В±Р РЋР вЂљР В Р’В°Р В Р вЂ¦", "Р В РІР‚в„ўР РЋРІР‚в„–Р В Р’В±Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В Р’В°Р В РЎвЂќР РЋРІР‚С™Р В РЎвЂР В Р вЂ Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋР С“Р РЋРІР‚С™Р В РЎвЂР В Р’В»Р РЋР Р‰, Р РЋРІР‚РЋР РЋРІР‚С™Р В РЎвЂўР В Р’В±Р РЋРІР‚в„– Р В РЎвЂўР В Р’В±Р РЋРЎвЂњР РЋРІР‚РЋР В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ Р В Р’В±Р РЋРІР‚в„–Р В Р’В»Р В РЎвЂў Р В РЎвЂќР В РЎвЂўР В Р вЂ¦Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™Р В Р вЂ¦Р РЋРІР‚в„–Р В РЎВ.")
+            QMessageBox.warning(self, "Стиль не выбран", "Выберите активный стиль, чтобы обучение было контекстным.")
             return
-
-        existing_index = self.topic_override_combo.findText(corrected_topic)
-        if existing_index < 0:
-            self.topic_override_combo.addItem(corrected_topic)
-            existing_index = self.topic_override_combo.findText(corrected_topic)
-        if existing_index >= 0:
-            self.topic_override_combo.setCurrentIndex(existing_index)
 
         self.style_manager.learn_from_topic_correction(
             style.id,
@@ -956,152 +1512,109 @@ class MainWindow(QMainWindow):
                 style.id,
             ),
         )
-        corrected_analysis = CaseAnalysis(
+        corrected = CaseAnalysis(
             topic=corrected_topic,
             signals=list(self.last_case_analysis.signals),
             extracted=dict(self.last_case_analysis.extracted),
+            customer_tone=self.last_case_analysis.customer_tone,
+            escalation_risk=self.last_case_analysis.escalation_risk,
+            priority=self.last_case_analysis.priority,
+            reply_style_label=self.last_case_analysis.reply_style_label,
         )
-        self._show_case_analysis(corrected_analysis, "Р В РЎСџР В РЎвЂўР В РўвЂР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋР вЂљР В Р’В¶Р В РўвЂР В Р’ВµР В Р вЂ¦Р В РЎвЂў")
-        self._set_status(f"Р В РЎС›Р В Р’ВµР В РЎВР В Р’В° Р РЋР С“Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’ВµР В Р вЂ¦Р В Р’В° Р В РЎвЂ Р РЋРЎвЂњР РЋР С“Р В РЎвЂР В Р’В»Р В РЎвЂР В Р’В»Р В Р’В° Р РЋР С“Р РЋРІР‚С™Р В РЎвЂР В Р’В»Р РЋР Р‰: {corrected_topic}")
-
-    def apply_processing_mode(self) -> None:
-        text_only = self.settings.values.processing_mode == "text_only"
-        self.screenshot_panel.setVisible(not text_only)
-        self.load_button.setVisible(not text_only)
-        self.analyze_button.setVisible(False)
-        if text_only:
-            self.current_image_path = None
-            self.current_clipboard_image_base64 = None
-            self.drop_zone.set_pixmap(None)
-            self._set_status("Р В РІР‚ВР РЋРІР‚в„–Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋР вЂљР В Р’ВµР В Р’В¶Р В РЎвЂР В РЎВ: Р В РЎвЂ“Р В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В Р’В°Р РЋРІР‚В Р В РЎвЂР РЋР РЏ Р РЋРІР‚С™Р В РЎвЂўР В Р’В»Р РЋР Р‰Р В РЎвЂќР В РЎвЂў Р В РЎвЂ”Р В РЎвЂў Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™Р РЋРЎвЂњ")
-        else:
-            self._set_status("Р В Р’В Р В Р’ВµР В Р’В¶Р В РЎвЂР В РЎВ Р РЋР С“Р В РЎвЂў Р РЋР С“Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™Р В Р’В°Р В РЎВР В РЎвЂ: Р В РЎвЂР В Р’В·Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р В Р’В¶Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ Р В РЎвЂР РЋР С“Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р РЋР Р‰Р В Р’В·Р РЋРЎвЂњР В Р’ВµР РЋРІР‚С™Р РЋР С“Р РЋР РЏ, Р В Р’ВµР РЋР С“Р В Р’В»Р В РЎвЂ Р В РЎвЂўР В Р вЂ¦Р В РЎвЂў Р В Р’В·Р В Р’В°Р В РЎвЂ“Р РЋР вЂљР РЋРЎвЂњР В Р’В¶Р В Р’ВµР В Р вЂ¦Р В РЎвЂў")
-        self._refresh_analyze_button_state()
-
-    def _set_status(self, message: str) -> None:
-        self.status_message.setText(message)
-        animation = QPropertyAnimation(self.status_message, b"maximumHeight", self)
-        animation.setDuration(180)
-        animation.setStartValue(24)
-        animation.setEndValue(38)
-        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
-
-    @staticmethod
-    def _format_duration(milliseconds: float | None) -> str:
-        if not milliseconds:
-            return "Р Р†Р вЂљРІР‚Сњ"
-        seconds = milliseconds / 1000
-        if seconds < 60:
-            return f"{seconds:.1f} Р РЋР С“Р В Р’ВµР В РЎвЂќ"
-        minutes = int(seconds // 60)
-        rest = int(seconds % 60)
-        return f"{minutes} Р В РЎВР В РЎвЂР В Р вЂ¦ {rest} Р РЋР С“Р В Р’ВµР В РЎвЂќ"
-
-    def _settings_changed(self) -> None:
-        set_allow_localhost(not self.settings.values.network_disabled)
-        app = QApplication.instance()
-        if app:
-            apply_theme(app, self.settings.values.theme)
-        self._apply_window_settings()
-        self.apply_processing_mode()
-        self.refresh_status()
+        self._show_case_analysis(corrected, "Подтверждено")
+        self.topic_override_container.setVisible(False)
+        self._set_status(f"Тема сохранена и усилила стиль: {corrected_topic}")
 
     def update_case_summary(self) -> None:
         text = self.customer_text.toPlainText().strip()
         ocr = self.ocr_text.toPlainText().strip()
         if not text and not ocr:
-            self.case_summary.set_placeholder("Р В РЎСџР РЋР вЂљР В РЎвЂР В Р’В·Р В Р вЂ¦Р В Р’В°Р В РЎвЂќР В РЎвЂ Р В РЎвЂ”Р В РЎвЂўР РЋР РЏР В Р вЂ Р РЋР РЏР РЋРІР‚С™Р РЋР С“Р РЋР РЏ Р В РЎвЂ”Р В РЎвЂўР РЋР С“Р В Р’В»Р В Р’Вµ Р В Р вЂ Р В Р вЂ Р В РЎвЂўР В РўвЂР В Р’В° Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™Р В Р’В° Р В РЎвЂР В Р’В»Р В РЎвЂ OCR.")
+            self._show_empty_summary()
             self.last_case_analysis = None
-            self.last_case_source = "Р В РЎвЂєР В Р’В¶Р В РЎвЂР В РўвЂР В Р’В°Р В Р вЂ¦Р В РЎвЂР В Р’Вµ"
-            self._sync_topic_override_controls(None)
-            self._refresh_analyze_button_state()
+            self.last_case_source = "Ожидание"
+            self._refresh_primary_action_state()
             return
         style = self.style_manager.get_style(self.settings.values.selected_style_id)
         analysis = self.case_analyzer.analyze(
             text,
             ocr,
             style_profile=style.profile if style else None,
+            reply_style_label=style.name if style else None,
         )
-        self._show_case_analysis(analysis, "Р В РЎСџР РЋР вЂљР В Р’ВµР В РўвЂР В РЎвЂ”Р РЋР вЂљР В РЎвЂўР РЋР С“Р В РЎВР В РЎвЂўР РЋРІР‚С™Р РЋР вЂљ")
-        self._refresh_analyze_button_state()
+        self._show_case_analysis(analysis, "Локально")
+        self._refresh_primary_action_state()
 
-    def _refresh_analyze_button_state(self) -> None:
-        has_text = bool(self.customer_text.toPlainText().strip() or self.ocr_text.toPlainText().strip())
-        can_use_ocr = (
-            self.settings.values.processing_mode != "text_only"
-            and self.settings.values.use_ocr
-            and bool(self.current_image_path)
-        )
-        enabled = not self._busy and (has_text or can_use_ocr)
-        can_generate = not self._busy and self._can_generate_from_current_preview()
-        self.analyze_button.setEnabled(enabled)
-        self.preview_button.setEnabled(not self._busy and has_text)
-        self.generate_button.setEnabled(enabled)
-
-        if can_generate:
-            self.generate_button.setText("Р В Р Р‹Р В РЎвЂ“Р В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™")
-        else:
-            self.generate_button.setText("Р В РЎСџР В РЎвЂўР В РўвЂР В РЎвЂ“Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В Р вЂ Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™")
-
-        if self._busy:
-            self.analyze_button.setToolTip("Р В РІР‚СњР В РЎвЂўР В Р’В¶Р В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’ВµР РЋР С“Р РЋР Р‰ Р В Р’В·Р В Р’В°Р В Р вЂ Р В Р’ВµР РЋР вЂљР РЋРІвЂљВ¬Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋРЎвЂњР РЋРІР‚В°Р В Р’ВµР В РІвЂћвЂ“ Р В РЎвЂўР В РЎвЂ”Р В Р’ВµР РЋР вЂљР В Р’В°Р РЋРІР‚В Р В РЎвЂР В РЎвЂ.")
-            self.preview_button.setToolTip("Р В РІР‚СњР В РЎвЂўР В Р’В¶Р В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’ВµР РЋР С“Р РЋР Р‰ Р В Р’В·Р В Р’В°Р В Р вЂ Р В Р’ВµР РЋР вЂљР РЋРІвЂљВ¬Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋРЎвЂњР РЋРІР‚В°Р В Р’ВµР В РІвЂћвЂ“ Р В РЎвЂўР В РЎвЂ”Р В Р’ВµР РЋР вЂљР В Р’В°Р РЋРІР‚В Р В РЎвЂР В РЎвЂ.")
-            self.generate_button.setToolTip("Р В РІР‚СњР В РЎвЂўР В Р’В¶Р В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’ВµР РЋР С“Р РЋР Р‰ Р В Р’В·Р В Р’В°Р В Р вЂ Р В Р’ВµР РЋР вЂљР РЋРІвЂљВ¬Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋРЎвЂњР РЋРІР‚В°Р В Р’ВµР В РІвЂћвЂ“ Р В РЎвЂўР В РЎвЂ”Р В Р’ВµР РЋР вЂљР В Р’В°Р РЋРІР‚В Р В РЎвЂР В РЎвЂ.")
-        elif can_generate:
-            self.generate_button.setToolTip("Р В Р Р‹Р В РЎвЂ“Р В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р РЋРІР‚С›Р В РЎвЂР В Р вЂ¦Р В Р’В°Р В Р’В»Р РЋР Р‰Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™ Р В РЎвЂ”Р В РЎвЂў Р РЋРЎвЂњР В Р’В¶Р В Р’Вµ Р В РЎвЂ”Р В РЎвЂўР В РўвЂР В РЎвЂ“Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В Р вЂ Р В Р’В»Р В Р’ВµР В Р вЂ¦Р В Р вЂ¦Р В РЎвЂўР В РЎВР РЋРЎвЂњ Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќР РЋРЎвЂњ.")
-        elif can_use_ocr:
-            self.analyze_button.setToolTip("Р В Р Р‹Р В РўвЂР В Р’ВµР В Р’В»Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р В Р вЂ Р РЋР С“Р РЋРІР‚В Р В РЎвЂ”Р В РЎвЂў Р РЋРІР‚В Р В Р’ВµР В РЎвЂ”Р В РЎвЂўР РЋРІР‚РЋР В РЎвЂќР В Р’Вµ: OCR -> Р В Р’В°Р В Р вЂ¦Р В Р’В°Р В Р’В»Р В РЎвЂР В Р’В· -> Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р В Р’В°.")
-            self.preview_button.setToolTip("Р В РІР‚СњР В Р’В»Р РЋР РЏ Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќР В Р’В° Р РЋР С“Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’В°Р В Р’В»Р В Р’В° Р В Р вЂ¦Р РЋРЎвЂњР В Р’В¶Р В Р’ВµР В Р вЂ¦ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™ Р В РЎвЂР В Р’В· Р РЋР С“Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ Р В РЎвЂР В Р’В»Р В РЎвЂ OCR.")
-            self.generate_button.setToolTip("Р В Р Р‹Р В РўвЂР В Р’ВµР В Р’В»Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р В Р вЂ Р РЋР С“Р РЋРІР‚В Р В РЎвЂ”Р В РЎвЂў Р РЋРІР‚В Р В Р’ВµР В РЎвЂ”Р В РЎвЂўР РЋРІР‚РЋР В РЎвЂќР В Р’Вµ: OCR -> Р В Р’В°Р В Р вЂ¦Р В Р’В°Р В Р’В»Р В РЎвЂР В Р’В· -> Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р В Р’В°.")
-        elif has_text:
-            self.analyze_button.setToolTip("Р В Р Р‹Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р РЋРІР‚С™Р В Р’ВµР В РЎВР РЋРЎвЂњ Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ Р В РЎвЂ Р В Р’В±Р РЋРІР‚в„–Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р В Р’В° Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р’ВµР В Р’В· FastAPI.")
-            self.preview_button.setToolTip("Р В Р Р‹Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р В Р’В±Р РЋРІР‚в„–Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р В Р’В° Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р’ВµР В Р’В· FastAPI Р В Р’В±Р В Р’ВµР В Р’В· Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р вЂ¦Р В РЎвЂўР В РІвЂћвЂ“ Р В РЎвЂ“Р В Р’ВµР В Р вЂ¦Р В Р’ВµР РЋР вЂљР В Р’В°Р РЋРІР‚В Р В РЎвЂР В РЎвЂ.")
-            self.generate_button.setToolTip("Р В Р Р‹Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р РЋРІР‚С™Р В Р’ВµР В РЎВР РЋРЎвЂњ Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ Р В РЎвЂ Р В Р’В±Р РЋРІР‚в„–Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р В Р’В° Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р’ВµР В Р’В· FastAPI.")
-        elif self.settings.values.processing_mode == "text_only":
-            self.analyze_button.setToolTip("Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ, Р РЋРІР‚РЋР РЋРІР‚С™Р В РЎвЂўР В Р’В±Р РЋРІР‚в„– Р В РЎвЂ”Р В РЎвЂўР В РўвЂР В РЎвЂ“Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В Р вЂ Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰ Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р В Р’В°.")
-            self.preview_button.setToolTip("Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ, Р РЋРІР‚РЋР РЋРІР‚С™Р В РЎвЂўР В Р’В±Р РЋРІР‚в„– Р РЋР С“Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќ.")
-            self.generate_button.setToolTip("Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ, Р РЋРІР‚РЋР РЋРІР‚С™Р В РЎвЂўР В Р’В±Р РЋРІР‚в„– Р В РЎвЂ”Р В РЎвЂўР В РўвЂР В РЎвЂ“Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂўР В Р вЂ Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰ Р РЋРІР‚РЋР В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В РЎвЂР В РЎвЂќ Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р В Р’В°.")
-        elif not self.settings.values.use_ocr:
-            self.analyze_button.setToolTip("Р В РІР‚в„ўР В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР В РЎвЂР РЋРІР‚С™Р В Р’Вµ OCR Р В РЎвЂР В Р’В»Р В РЎвЂ Р В Р вЂ Р В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™ Р В Р вЂ Р РЋР вЂљР РЋРЎвЂњР РЋРІР‚РЋР В Р вЂ¦Р РЋРЎвЂњР РЋР вЂ№.")
-            self.preview_button.setToolTip("Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™ Р В Р вЂ Р РЋР вЂљР РЋРЎвЂњР РЋРІР‚РЋР В Р вЂ¦Р РЋРЎвЂњР РЋР вЂ№ Р В РЎвЂР В Р’В»Р В РЎвЂ Р РЋР С“Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’В°Р В Р’В»Р В Р’В° Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р РЋРЎвЂњР РЋРІР‚РЋР В РЎвЂР РЋРІР‚С™Р В Р’Вµ OCR.")
-            self.generate_button.setToolTip("Р В РІР‚в„ўР В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР В РЎвЂР РЋРІР‚С™Р В Р’Вµ OCR Р В РЎвЂР В Р’В»Р В РЎвЂ Р В Р вЂ Р В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™ Р В Р вЂ Р РЋР вЂљР РЋРЎвЂњР РЋРІР‚РЋР В Р вЂ¦Р РЋРЎвЂњР РЋР вЂ№.")
-        else:
-            self.analyze_button.setToolTip("Р В РІР‚вЂќР В Р’В°Р В РЎвЂ“Р РЋР вЂљР РЋРЎвЂњР В Р’В·Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™ Р В РЎвЂР В Р’В»Р В РЎвЂ Р В Р вЂ Р В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ.")
-            self.preview_button.setToolTip("Р В РЎСљР РЋРЎвЂњР В Р’В¶Р В Р’ВµР В Р вЂ¦ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™ Р РЋР С“Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ Р В РЎвЂР В Р’В»Р В РЎвЂ OCR-Р В РЎвЂќР В РЎвЂўР В Р вЂ¦Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋР С“Р РЋРІР‚С™.")
-            self.generate_button.setToolTip("Р В РІР‚вЂќР В Р’В°Р В РЎвЂ“Р РЋР вЂљР РЋРЎвЂњР В Р’В·Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В РЎвЂќР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІвЂљВ¬Р В РЎвЂўР РЋРІР‚С™ Р В РЎвЂР В Р’В»Р В РЎвЂ Р В Р вЂ Р В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ.")
-
-    def _current_context_signature(self) -> tuple[str, str, str, str]:
-        style = self.style_manager.get_style(self.settings.values.selected_style_id)
-        style_name = style.name if style else ""
-        image_key = str(self.current_image_path or "")
-        return (
-            self.customer_text.toPlainText().strip(),
-            self.ocr_text.toPlainText().strip(),
-            style_name,
-            image_key,
-        )
-
-    def _can_generate_from_current_preview(self) -> bool:
-        if not self.response_text.toPlainText().strip():
-            return False
-        if self.preview_context_signature is None:
-            return False
-        return self.preview_context_signature == self._current_context_signature()
+    def _show_empty_summary(self) -> None:
+        self.summary_source_label.setText("Ожидание")
+        self.summary_topic_value.setText("Тема не определена")
+        self.summary_tone_value.setText("Нейтральный")
+        self.summary_risk_value.setText("Низкий")
+        self.summary_priority_value.setText("Обычный")
+        self.summary_style_value.setText(self._current_style_name())
+        self._apply_semantic_label(self.summary_topic_value, "neutral")
+        self._apply_semantic_label(self.summary_tone_value, "neutral")
+        self._apply_semantic_label(self.summary_risk_value, "positive")
+        self._apply_semantic_label(self.summary_priority_value, "neutral")
+        self._apply_semantic_label(self.summary_style_value, "accent")
+        self.summary_signal_chips.set_items([])
+        self.summary_details_label.setText("Появится после анализа обращения.")
+        self.analytics_chips.set_items([])
+        self.topic_override_toggle.setEnabled(False)
+        self.topic_override_container.setVisible(False)
+        self.topic_override_combo.setCurrentText("")
+        self._refresh_style_summary()
 
     def _show_case_analysis(self, analysis: CaseAnalysis, source: str) -> None:
         self.last_case_analysis = analysis
         self.last_case_source = source
-        self.case_summary.set_analysis(
-            topic=analysis.topic,
-            signals=analysis.signals,
-            extracted=analysis.extracted,
-            source=source,
+        self.summary_source_label.setText(source)
+        self.summary_topic_value.setText(analysis.topic or "Тема не определена")
+        self.summary_tone_value.setText(analysis.customer_tone)
+        self.summary_risk_value.setText(analysis.escalation_risk)
+        self.summary_priority_value.setText(analysis.priority)
+        self.summary_style_value.setText(analysis.reply_style_label or self._current_style_name())
+        self._apply_semantic_label(self.summary_topic_value, "positive")
+        tone_state = "negative" if analysis.customer_tone in {"Негативный", "Резкий"} else "neutral"
+        self._apply_semantic_label(self.summary_tone_value, tone_state)
+        if analysis.escalation_risk == "Высокий":
+            risk_state = "negative"
+        elif analysis.escalation_risk == "Средний":
+            risk_state = "warning"
+        else:
+            risk_state = "positive"
+        self._apply_semantic_label(self.summary_risk_value, risk_state)
+        if analysis.priority == "Высокий":
+            priority_state = "negative"
+        elif analysis.priority == "Повышенный":
+            priority_state = "warning"
+        else:
+            priority_state = "neutral"
+        self._apply_semantic_label(self.summary_priority_value, priority_state)
+        self._apply_semantic_label(self.summary_style_value, "accent")
+        self.summary_signal_chips.set_items(analysis.signals[:3])
+
+        detail_parts: list[str] = []
+        if analysis.extracted.get("amounts"):
+            detail_parts.append("Суммы: " + ", ".join(analysis.extracted["amounts"][:3]))
+        if analysis.extracted.get("dates"):
+            detail_parts.append("Даты: " + ", ".join(analysis.extracted["dates"][:3]))
+        if analysis.extracted.get("mcc_codes"):
+            detail_parts.append("MCC: " + ", ".join(analysis.extracted["mcc_codes"][:4]))
+        self.summary_details_label.setText(" • ".join(detail_parts) if detail_parts else "Явных признаков пока нет.")
+        self.analytics_chips.set_items(
+            [
+                f"Тема: {analysis.topic}",
+                f"Тон: {analysis.customer_tone}",
+                f"Риск: {analysis.escalation_risk}",
+                f"Приоритет: {analysis.priority}",
+                f"Стиль: {analysis.reply_style_label or self._current_style_name()}",
+            ]
         )
-        self._sync_topic_override_controls(analysis.topic)
+        self.topic_override_toggle.setEnabled(True)
+        self._sync_topic_override_value(analysis.topic)
 
     def _show_analysis_payload(self, payload: dict, source: str) -> None:
-        topic = str(payload.get("topic", "Р В РЎвЂєР В Р’В±Р РЋРІР‚В°Р В Р’ВµР В Р’Вµ Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ"))
+        topic = str(payload.get("topic", "Общее обращение"))
         signals = payload.get("signals", [])
         if not isinstance(signals, list):
             signals = []
@@ -1117,24 +1630,96 @@ class MainWindow(QMainWindow):
             topic=topic,
             signals=[str(item) for item in signals],
             extracted=normalized_extracted,
+            customer_tone=str(payload.get("customer_tone", "Нейтральный")),
+            escalation_risk=str(payload.get("escalation_risk", "Низкий")),
+            priority=str(payload.get("priority", "Обычный")),
+            reply_style_label=str(payload.get("reply_style_label", "")).strip() or self._current_style_name(),
         )
         self._show_case_analysis(analysis, source)
+
+    def _sync_topic_override_value(self, topic: str | None = None) -> None:
+        if not self.last_case_analysis:
+            self.topic_override_container.setVisible(False)
+            return
+        selected_topic = (topic or self.last_case_analysis.topic).strip()
+        existing_index = self.topic_override_combo.findText(selected_topic)
+        if existing_index < 0:
+            self.topic_override_combo.addItem(selected_topic)
+            existing_index = self.topic_override_combo.findText(selected_topic)
+        self.topic_override_combo.setCurrentIndex(existing_index)
+
+    def _refresh_primary_action_state(self) -> None:
+        self.primary_action_button.setEnabled(not self._busy and self._has_context())
+        self.primary_action_button.setToolTip(
+            "Собрать тему, локальные факты и сразу подготовить итоговый ответ."
+        )
+        self.remove_screenshot_button.setEnabled(not self._busy and bool(self.current_image_path))
+
+    def _has_context(self) -> bool:
+        has_text = bool(self.customer_text.toPlainText().strip() or self.ocr_text.toPlainText().strip())
+        has_image = bool(self.current_image_path or self.current_clipboard_image_base64) and self.settings.values.processing_mode != "text_only"
+        return has_text or has_image
+
+    def _current_style_name(self) -> str:
+        style = self.style_manager.get_style(self.settings.values.selected_style_id)
+        return style.name if style else "Не выбран"
+
+    def _refresh_style_summary(self) -> None:
+        style = self.style_manager.get_style(self.settings.values.selected_style_id)
+        if not style:
+            self.current_style_name.setText("Не выбран")
+            self.current_style_tone.setText("Стиль ответа ещё не выбран.")
+            self.current_style_pill.setText("Не выбран")
+            for label in self.recent_styles_labels:
+                label.setText("—")
+            return
+        self.current_style_name.setText(style.name)
+        tone = str(style.profile.get("tone", "нейтральный"))
+        paragraph_style = str(style.profile.get("paragraph_style", "короткие абзацы"))
+        self.current_style_tone.setText(f"{tone.capitalize()} • {paragraph_style}")
+        self.current_style_pill.setText(style.name)
+        recent = [item.name for item in self.style_manager.list_styles()[:3]]
+        for index, label in enumerate(self.recent_styles_labels):
+            label.setText(recent[index] if index < len(recent) else "—")
+
+    def _set_status(self, message: str) -> None:
+        self.status_message.setText(message)
+
+    def _set_expert_debug(self, message: str) -> None:
+        clean = message.strip()
+        self.expert_debug_label.setText(clean)
+        self.expert_debug_label.setVisible(bool(clean) and self.settings.values.expert_mode)
+
+    @staticmethod
+    def _apply_semantic_label(label: QLabel, semantic: str) -> None:
+        label.setProperty("semantic", semantic)
+        label.style().unpolish(label)
+        label.style().polish(label)
+
+    @staticmethod
+    def _format_duration(milliseconds: float | None) -> str:
+        if not milliseconds:
+            return "—"
+        seconds = milliseconds / 1000
+        if seconds < 60:
+            return f"{seconds:.1f} сек"
+        minutes = int(seconds // 60)
+        rest = int(seconds % 60)
+        return f"{minutes} мин {rest} сек"
+
+    def _settings_changed(self) -> None:
+        set_allow_localhost(not self.settings.values.network_disabled)
+        app = QApplication.instance()
+        if app:
+            apply_theme(app, self.settings.values.theme)
+        self._apply_theme_button_state()
+        self._apply_window_settings()
+        self._apply_expert_mode(self.settings.values.expert_mode, persist=False)
+        self.apply_processing_mode()
+        self.refresh_status()
+        self._refresh_style_summary()
+        self.update_case_summary()
 
     def _forget_worker(self, worker) -> None:
         if worker in self.workers:
             self.workers.remove(worker)
-
-    def _model_changed(self, model: str) -> None:
-        if model:
-            self.settings.update(preferred_model=model)
-
-    def _apply_window_settings(self) -> None:
-        flags = self.windowFlags()
-        if self.settings.values.always_on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
-        else:
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
-        self.setWindowFlags(flags)
-        if self.settings.values.compact_mode:
-            self.resize(980, 620)
-        self.show()

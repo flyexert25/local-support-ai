@@ -292,15 +292,26 @@ class ToggleSwitch(QAbstractButton):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        is_light_theme = self.palette().window().color().lightness() > 180
 
         if not self.isEnabled():
-            track_color = QColor("#2A3038") if self.isChecked() else QColor("#242932")
-            knob_color = QColor("#A7B0BC")
-            border_color = QColor("#38404D")
+            if is_light_theme:
+                track_color = QColor("#E5E7EB")
+                knob_color = QColor("#9CA3AF")
+                border_color = QColor("#CBD5E1")
+            else:
+                track_color = QColor("#2A3038") if self.isChecked() else QColor("#242932")
+                knob_color = QColor("#A7B0BC")
+                border_color = QColor("#38404D")
         else:
-            track_color = QColor("#5A67FF") if self.isChecked() else QColor("#303745")
-            knob_color = QColor("#F7FAFC")
-            border_color = QColor("#7C87FF") if self.isChecked() else QColor("#414A59")
+            if is_light_theme:
+                track_color = QColor("#6366F1") if self.isChecked() else QColor("#E5E7EB")
+                knob_color = QColor("#FFFFFF") if self.isChecked() else QColor("#6B7280")
+                border_color = QColor("#6366F1") if self.isChecked() else QColor("#C7CFDC")
+            else:
+                track_color = QColor("#6366F1") if self.isChecked() else QColor("#303745")
+                knob_color = QColor("#F7FAFC")
+                border_color = QColor("#7A7EF3") if self.isChecked() else QColor("#414A59")
 
         painter.setPen(border_color)
         painter.setBrush(track_color)

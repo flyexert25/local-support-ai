@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+set -eu
+
+python scripts/encoding_guard.py --staged --fix
+

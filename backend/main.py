@@ -14,6 +14,7 @@ from app.core.learning_manager import LearningManager
 from app.core.settings_manager import SettingsManager
 from app.storage.database import Database
 from app.styles.style_manager import StyleManager
+from app.ai.ai_manager import AIManager
 
 
 app = FastAPI()
@@ -23,6 +24,7 @@ style_manager = StyleManager(database)
 learning_manager = LearningManager(database)
 case_analyzer = CaseAnalyzer()
 knowledge_service = KnowledgeService(PROJECT_ROOT)
+ai_manager = AIManager(settings)
 
 
 class EchoRequest(BaseModel):
@@ -58,6 +60,28 @@ class GeneratePreviewResponse(BaseModel):
     knowledge_articles: list[str]
     knowledge_facts: list[str]
     draft_reply: str
+
+
+class GenerateFinalRequest(BaseModel):
+    customer_text: str
+    ocr_text: str | None = None
+    selected_style: str | None = None
+    model: str | None = None
+    image_base64: str | None = None
+
+
+class GenerateFinalResponse(BaseModel):
+    response_text: str
+    model: str
+    topic: str
+    signals: list[str]
+    extracted: dict[str, list[str]]
+    customer_tone: str
+    escalation_risk: str
+    priority: str
+    reply_style_label: str | None = None
+    knowledge_articles: list[str]
+    knowledge_facts: list[str]
 
 
 @app.get("/")
@@ -158,6 +182,60 @@ def generate_preview(data: GeneratePreviewRequest):
             style.profile if style else None,
             knowledge_facts=knowledge_facts[:2],
         ),
+    )
+
+
+@app.post("/generate-final", response_model=GenerateFinalResponse)
+def generate_final(data: GenerateFinalRequest):
+    style = _resolve_style(data.selected_style)
+    model = (data.model or settings.values.preferred_model or "").strip()
+    if not model:
+        raise ValueError("Не выбрана локальная модель для генерации.")
+
+    analysis = case_analyzer.analyze(
+        data.customer_text,
+        data.ocr_text or "",
+        style_profile=style.profile if style else None,
+        reply_style_label=style.name if style else None,
+    )
+    knowledge_matches = knowledge_service.search(
+        customer_text=data.customer_text,
+        ocr_text=data.ocr_text or "",
+        topic=analysis.topic,
+        limit=2,
+    )
+    knowledge_titles = [match.title for match in knowledge_matches]
+    knowledge_facts: list[str] = []
+    for match in knowledge_matches:
+        for fact in match.facts:
+            if fact and fact not in knowledge_facts:
+                knowledge_facts.append(fact)
+
+    style_prompt = style_manager.build_style_prompt(style)
+    quality_rules = learning_manager.build_quality_rules(style.profile if style else None)
+    reply = ai_manager.generate_reply(
+        customer_text=data.customer_text,
+        ocr_text=data.ocr_text or "",
+        style_prompt=style_prompt,
+        quality_rules=quality_rules,
+        model=model,
+        image_base64=data.image_base64,
+        topic_hint=analysis.topic,
+        knowledge_facts=knowledge_facts[:2],
+    )
+
+    return GenerateFinalResponse(
+        response_text=reply,
+        model=model,
+        topic=analysis.topic,
+        signals=analysis.signals,
+        extracted=analysis.extracted,
+        customer_tone=analysis.customer_tone,
+        escalation_risk=analysis.escalation_risk,
+        priority=analysis.priority,
+        reply_style_label=analysis.reply_style_label,
+        knowledge_articles=knowledge_titles,
+        knowledge_facts=knowledge_facts[:2],
     )
 
 

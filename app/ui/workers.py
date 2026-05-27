@@ -140,6 +140,44 @@ class BackendPreviewWorker(QObject):
             self.failed.emit(str(exc), elapsed_ms)
 
 
+class BackendGenerateWorker(QObject):
+    finished = pyqtSignal(dict, float)
+    failed = pyqtSignal(str, float)
+
+    def __init__(
+        self,
+        backend_client: BackendClient,
+        customer_text: str,
+        ocr_text: str,
+        selected_style: str | None,
+        model: str | None,
+        image_base64: str | None,
+    ) -> None:
+        super().__init__()
+        self.backend_client = backend_client
+        self.customer_text = customer_text
+        self.ocr_text = ocr_text
+        self.selected_style = selected_style
+        self.model = model
+        self.image_base64 = image_base64
+
+    def run(self) -> None:
+        started_at = perf_counter()
+        try:
+            payload = self.backend_client.generate_final(
+                customer_text=self.customer_text,
+                ocr_text=self.ocr_text,
+                selected_style=self.selected_style,
+                model=self.model,
+                image_base64=self.image_base64,
+            )
+            elapsed_ms = (perf_counter() - started_at) * 1000
+            self.finished.emit(payload, elapsed_ms)
+        except Exception as exc:
+            elapsed_ms = (perf_counter() - started_at) * 1000
+            self.failed.emit(str(exc), elapsed_ms)
+
+
 def start_worker(worker: QObject) -> QThread:
     thread = QThread()
     worker.moveToThread(thread)

@@ -18,6 +18,8 @@ class AppSettings:
     ocr_languages: tuple[str, ...] = ("ru", "en")
     selected_style_id: int | None = None
     theme: str = "dark"
+    corner_radius: str = "medium"
+    button_style: str = "soft"
     expert_mode: bool = False
     always_on_top: bool = False
     compact_mode: bool = False

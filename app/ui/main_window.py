@@ -37,7 +37,14 @@ from app.styles.style_manager import StyleManager
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.theme import apply_theme
 from app.ui.widgets import AnalyticsChips, CaseInsightPanel, StatusPill, ToggleSwitch
-from app.ui.workers import BackendAnalyzeWorker, BackendPreviewWorker, GenerateWorker, OCRWorker, start_worker
+from app.ui.workers import (
+    BackendAnalyzeWorker,
+    BackendGenerateWorker,
+    BackendPreviewWorker,
+    GenerateWorker,
+    OCRWorker,
+    start_worker,
+)
 from app.utils.image_utils import (
     SUPPORTED_IMAGE_EXTENSIONS,
     image_path_to_base64,
@@ -140,13 +147,10 @@ class MainWindow(QMainWindow):
         self.logo_label.setObjectName("LogoMark")
         self.logo_label.setFixedSize(22, 22)
         brand_box = QVBoxLayout()
-        brand_box.setSpacing(2)
+        brand_box.setSpacing(0)
         title = QLabel("Local Support AI")
         title.setObjectName("Title")
-        subtitle = QLabel("Offline-first генератор ответов по обращениям")
-        subtitle.setObjectName("Subtle")
         brand_box.addWidget(title)
-        brand_box.addWidget(subtitle)
 
         self.local_status = StatusPill("Local", True)
         self.ready_status = StatusPill("Готово", True)
@@ -201,7 +205,6 @@ class MainWindow(QMainWindow):
             ("analytics", "OCR и скриншоты"),
             ("bookmark", "Стили ответов"),
             ("history", "История и SLA"),
-            ("settings", "Настройки"),
         ]
         for index, (icon_name, tooltip) in enumerate(buttons):
             button = QPushButton()
@@ -210,12 +213,16 @@ class MainWindow(QMainWindow):
             button.setToolTip(tooltip)
             button.setFixedSize(40, 40)
             self.rail_icon_names.append(icon_name)
-            if index == 0:
+            if icon_name == "plus":
                 button.clicked.connect(self.clear_all)
-            elif index == 1:
+            elif icon_name == "message":
                 button.clicked.connect(lambda: self.customer_text.setFocus())
-            elif index == 5:
-                button.clicked.connect(self.open_settings)
+            elif icon_name == "analytics":
+                button.clicked.connect(lambda: self.open_settings(tab_index=0))
+            elif icon_name == "bookmark":
+                button.clicked.connect(lambda: self.open_settings(tab_index=2))
+            elif icon_name == "history":
+                button.clicked.connect(lambda: self.open_settings(tab_index=3))
             else:
                 button.clicked.connect(lambda checked=False: self._expert_toggled(True))
             self.rail_buttons_group.addButton(button, index)
@@ -241,6 +248,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.answer_card, 4)
 
         bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 14, 0)
         bottom_row.setSpacing(10)
         self.clear_button = QPushButton("Очистить")
         self.clear_button.setObjectName("Ghost")
@@ -278,10 +286,12 @@ class MainWindow(QMainWindow):
         actions.setSpacing(8)
         self.screenshot_button = QPushButton("Скриншот")
         self.screenshot_button.setObjectName("Ghost")
+        self.screenshot_button.setMinimumWidth(104)
         self.screenshot_button.setToolTip("Добавить скриншот")
         self.screenshot_button.clicked.connect(self.open_image_dialog)
         self.ocr_only_button = QPushButton("OCR со скриншота")
         self.ocr_only_button.setObjectName("Ghost")
+        self.ocr_only_button.setMinimumWidth(156)
         self.ocr_only_button.clicked.connect(self._manual_ocr_only)
         self.remove_screenshot_button = QPushButton("Убрать")
         self.remove_screenshot_button.setObjectName("Tiny")
@@ -314,6 +324,7 @@ class MainWindow(QMainWindow):
         header_row.setSpacing(8)
         title = QLabel("Итоговый ответ")
         title.setObjectName("PanelTitle")
+        title.setMinimumWidth(150)
         header_row.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
         header_row.addStretch(1)
 
@@ -386,9 +397,11 @@ class MainWindow(QMainWindow):
         self.feedback_negative_button.clicked.connect(self._toggle_negative_feedback)
         self.copy_button = QPushButton("Копировать")
         self.copy_button.setObjectName("Ghost")
+        self.copy_button.setMinimumWidth(108)
         self.copy_button.clicked.connect(self.copy_reply)
         self.save_to_style_button = QPushButton("Сохранить как удачный стиль")
         self.save_to_style_button.setObjectName("Ghost")
+        self.save_to_style_button.setMinimumWidth(210)
         self.save_to_style_button.clicked.connect(self.save_reply_to_style)
         feedback_row.addWidget(self.feedback_caption)
         feedback_row.addWidget(self.feedback_positive_button)
@@ -582,6 +595,8 @@ class MainWindow(QMainWindow):
 
     def _render_icon(self, name: str, size: int = 18, color: str | None = None) -> QIcon:
         icon_path = Path(__file__).resolve().parents[2] / "assets" / "icons" / f"{name}.svg"
+        if not icon_path.exists():
+            icon_path = Path(__file__).resolve().parents[2] / "assets" / "icons" / "moon.svg"
         svg_text = icon_path.read_text(encoding="utf-8").replace("currentColor", color or self._icon_color())
         renderer = QSvgRenderer(QByteArray(svg_text.encode("utf-8")))
         pixmap = QPixmap(size, size)
@@ -611,18 +626,10 @@ class MainWindow(QMainWindow):
         color = self._icon_color()
         white = "#FFFFFF"
 
-        logo_path = Path(__file__).resolve().parents[2] / "assets" / "app_icon.png"
-        if logo_path.exists():
-            self.logo_label.setPixmap(
-                QPixmap(str(logo_path)).scaled(
-                    20,
-                    20,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+        self.logo_label.setPixmap(self._render_icon("logo-mark", size=20).pixmap(20, 20))
 
-        self._set_button_icon(self.theme_button, "moon", "Переключить тему", color=color)
+        theme_icon = "moon" if self.settings.values.theme == "light" else "sun"
+        self._set_button_icon(self.theme_button, theme_icon, " ", color=color)
         self._set_button_icon(self.menu_button, "menu", "Открыть меню", color=color)
 
         for button, icon_name in zip(self.rail_buttons, self.rail_icon_names):
@@ -824,7 +831,7 @@ class MainWindow(QMainWindow):
         self.settings.update(theme=next_theme)
         app = QApplication.instance()
         if app:
-            apply_theme(app, next_theme)
+            apply_theme(app, next_theme, self.settings.values.corner_radius, self.settings.values.button_style)
         self._apply_theme_button_state()
 
     def _expert_toggled(self, enabled: bool) -> None:
@@ -838,8 +845,10 @@ class MainWindow(QMainWindow):
         self.statuses_card.setVisible(enabled)
         self.recent_styles_card.setVisible(enabled)
         if enabled:
+            self.setMinimumSize(1240, 760)
             self.resize(1320, 820)
         else:
+            self.setMinimumSize(980, 640)
             self.resize(1100, 760)
         if persist and self.settings.values.expert_mode != enabled:
             self.settings.update(expert_mode=enabled)
@@ -1062,13 +1071,59 @@ class MainWindow(QMainWindow):
 
         model = self.model_combo.currentText().strip() or self.settings.values.preferred_model
         style = self.style_manager.get_style(self.settings.values.selected_style_id)
-        style_prompt = self.style_manager.build_style_prompt(style)
-        quality_rules = self.learning_manager.build_quality_rules(style.profile if style else None)
         image_base64 = None if text_only else self.current_clipboard_image_base64
         if self.current_image_path and not text_only:
             image_base64 = image_path_to_base64(self.current_image_path)
+        self._set_busy(True, "Готовлю итоговый ответ через FastAPI...")
+        worker = BackendGenerateWorker(
+            self.backend_client,
+            customer_text=customer,
+            ocr_text=ocr,
+            selected_style=style.name if style else None,
+            model=model,
+            image_base64=image_base64,
+        )
+        style_id = style.id if style else None
+        style_profile = style.profile if style else None
+        worker.finished.connect(
+            lambda payload, elapsed_ms: self._backend_generation_finished(
+                payload,
+                model,
+                style_id,
+                style_profile,
+                elapsed_ms,
+            )
+        )
+        worker.failed.connect(
+            lambda message, elapsed_ms, customer_text=customer, ocr_text=ocr, m=model, sid=style_id, sprofile=style_profile, img=image_base64: self._backend_generation_failed(
+                message,
+                elapsed_ms,
+                customer_text,
+                ocr_text,
+                m,
+                sid,
+                sprofile,
+                img,
+            )
+        )
+        worker.finished.connect(lambda *_: self._forget_worker(worker))
+        worker.failed.connect(lambda *_: self._forget_worker(worker))
+        self.workers.append(worker)
+        self.threads.append(start_worker(worker))
 
-        payload = preview_payload or self.last_preview_payload or {}
+    def _start_local_generation_fallback(
+        self,
+        customer_text: str,
+        ocr_text: str,
+        model: str,
+        style_id: int | None,
+        style_profile: dict | None,
+        image_base64: str | None,
+    ) -> None:
+        selected_style = self.style_manager.get_style(style_id) if style_id else None
+        style_prompt = self.style_manager.build_style_prompt(selected_style)
+        quality_rules = self.learning_manager.build_quality_rules(style_profile)
+        payload = self.last_preview_payload or {}
         topic_hint = str(payload.get("topic", "")).strip() or (self.last_case_analysis.topic if self.last_case_analysis else None)
         knowledge_facts = payload.get("knowledge_facts", []) if isinstance(payload, dict) else []
         if not isinstance(knowledge_facts, list):
@@ -1077,8 +1132,8 @@ class MainWindow(QMainWindow):
         self._set_busy(True, "Готовлю итоговый ответ локально...")
         worker = GenerateWorker(
             self.ai_manager,
-            customer,
-            ocr,
+            customer_text,
+            ocr_text,
             style_prompt,
             quality_rules,
             model,
@@ -1086,9 +1141,16 @@ class MainWindow(QMainWindow):
             topic_hint=topic_hint,
             knowledge_facts=[str(item) for item in knowledge_facts][:2],
         )
-        style_id = style.id if style else None
-        style_profile = style.profile if style else None
-        worker.finished.connect(lambda text, elapsed_ms: self._generation_finished(text, model, style_id, style_profile, elapsed_ms))
+        worker.finished.connect(
+            lambda text, elapsed_ms: self._generation_finished(
+                text,
+                model,
+                style_id,
+                style_profile,
+                elapsed_ms,
+                source_label="локально (fallback)",
+            )
+        )
         worker.failed.connect(self._worker_failed)
         worker.finished.connect(lambda *_: self._forget_worker(worker))
         worker.failed.connect(lambda *_: self._forget_worker(worker))
@@ -1151,7 +1213,7 @@ class MainWindow(QMainWindow):
         self._clear_image_only()
         self._set_status("Экран очищен.")
 
-    def open_settings(self) -> None:
+    def open_settings(self, tab_index: int | None = None) -> None:
         dialog = SettingsDialog(
             self.settings,
             self.style_manager,
@@ -1160,6 +1222,8 @@ class MainWindow(QMainWindow):
             self.ocr_manager,
             self,
         )
+        if tab_index is not None and 0 <= tab_index < dialog.tabs.count():
+            dialog.tabs.setCurrentIndex(tab_index)
         dialog.settingsChanged.connect(self._settings_changed)
         dialog.exec()
 
@@ -1251,6 +1315,7 @@ class MainWindow(QMainWindow):
         style_id: int | None,
         style_profile: dict | None,
         elapsed_ms: float,
+        source_label: str = "локально",
     ) -> None:
         try:
             self._set_stage_metric("generate_ms", elapsed_ms)
@@ -1291,7 +1356,7 @@ class MainWindow(QMainWindow):
                 ),
             )
             self._show_case_analysis(analysis, "Локально")
-            self._set_status(f"Ответ подготовлен локально • {self._format_duration(elapsed_ms)}")
+            self._set_status(f"Ответ подготовлен {source_label} • {self._format_duration(elapsed_ms)}")
         except Exception as exc:
             QMessageBox.warning(self, "Ошибка после генерации", str(exc))
             self._set_status("Ответ получен, но не удалось сохранить аналитику.")
@@ -1299,6 +1364,52 @@ class MainWindow(QMainWindow):
         finally:
             self._autofinalize_after_preview = False
             self._set_busy(False)
+
+    def _backend_generation_finished(
+        self,
+        payload: dict,
+        fallback_model: str,
+        style_id: int | None,
+        style_profile: dict | None,
+        elapsed_ms: float,
+    ) -> None:
+        response_text = str(payload.get("response_text", "")).strip()
+        if not response_text:
+            self._worker_failed("FastAPI вернул пустой итоговый ответ.")
+            return
+        model = str(payload.get("model", "")).strip() or fallback_model
+        self._generation_finished(
+            response_text,
+            model,
+            style_id,
+            style_profile,
+            elapsed_ms,
+            source_label="через FastAPI",
+        )
+
+    def _backend_generation_failed(
+        self,
+        message: str,
+        elapsed_ms: float,
+        customer_text: str,
+        ocr_text: str,
+        model: str,
+        style_id: int | None,
+        style_profile: dict | None,
+        image_base64: str | None,
+    ) -> None:
+        self._set_stage_metric("generate_ms", elapsed_ms)
+        self._set_expert_debug(message)
+        self._set_status("FastAPI недоступен для генерации. Перехожу на локальную генерацию.")
+        self._set_busy(False)
+        self._start_local_generation_fallback(
+            customer_text,
+            ocr_text,
+            model,
+            style_id,
+            style_profile,
+            image_base64,
+        )
 
     def _worker_failed(self, message: str) -> None:
         self._autofinalize_after_preview = False
@@ -1711,7 +1822,12 @@ class MainWindow(QMainWindow):
         set_allow_localhost(not self.settings.values.network_disabled)
         app = QApplication.instance()
         if app:
-            apply_theme(app, self.settings.values.theme)
+            apply_theme(
+                app,
+                self.settings.values.theme,
+                self.settings.values.corner_radius,
+                self.settings.values.button_style,
+            )
         self._apply_theme_button_state()
         self._apply_window_settings()
         self._apply_expert_mode(self.settings.values.expert_mode, persist=False)

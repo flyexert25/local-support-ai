@@ -16,8 +16,16 @@ class LocalBackendLauncher:
         self._process: subprocess.Popen | None = None
 
     def ensure_running(self, timeout_seconds: float = 8.0) -> bool:
+        # If something old is already listening on the backend port,
+        # restart it to guarantee we run the current backend code.
         if self.is_running():
-            return True
+            existing_pid = self._listening_pid()
+            own_pid = self._process.pid if self._process and self._process.poll() is None else None
+            if existing_pid and existing_pid != own_pid:
+                self._terminate_pid(existing_pid)
+                time.sleep(0.2)
+            else:
+                return True
 
         process = self._spawn_backend()
         if process is None:
@@ -42,6 +50,10 @@ class LocalBackendLauncher:
 
     def stop(self) -> None:
         if not self._process or self._process.poll() is not None:
+            # Best effort: if some orphan backend still listens on this port, stop it.
+            existing_pid = self._listening_pid()
+            if existing_pid:
+                self._terminate_pid(existing_pid)
             return
         self._process.terminate()
         try:
@@ -50,6 +62,10 @@ class LocalBackendLauncher:
             self._process.kill()
         finally:
             self._process = None
+        # Extra guard against zombie listeners.
+        existing_pid = self._listening_pid()
+        if existing_pid:
+            self._terminate_pid(existing_pid)
 
     def _spawn_backend(self) -> subprocess.Popen | None:
         if not self.backend_dir.exists():
@@ -83,8 +99,49 @@ class LocalBackendLauncher:
         venv_python = self.backend_dir / ".venv" / "Scripts" / "python.exe"
         if venv_python.exists():
             return venv_python
-
         current_python = Path(sys.executable)
         if current_python.exists() and current_python.suffix.lower() == ".exe":
             return current_python
         return None
+
+    def _listening_pid(self) -> int | None:
+        try:
+            output = subprocess.check_output(
+                ["netstat", "-ano", "-p", "tcp"],
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+            )
+        except Exception:
+            return None
+
+        port_suffix = f":{self.port}"
+        for line in output.splitlines():
+            normalized = " ".join(line.split())
+            if not normalized or "LISTENING" not in normalized:
+                continue
+            parts = normalized.split(" ")
+            if len(parts) < 5:
+                continue
+            local_addr = parts[1]
+            state = parts[3]
+            pid_raw = parts[4]
+            if state != "LISTENING" or not local_addr.endswith(port_suffix):
+                continue
+            try:
+                return int(pid_raw)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _terminate_pid(pid: int) -> None:
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/F", "/T"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass

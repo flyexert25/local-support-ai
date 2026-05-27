@@ -24,7 +24,7 @@ def run() -> int:
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
     settings = SettingsManager()
-    apply_theme(app, settings.values.theme)
+    apply_theme(app, settings.values.theme, settings.values.corner_radius, settings.values.button_style)
     install_network_guard(allow_localhost=not settings.values.network_disabled)
     backend_launcher = LocalBackendLauncher(project_root)
     if not settings.values.network_disabled:

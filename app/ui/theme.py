@@ -60,6 +60,17 @@ QFrame#Panel[flat_section="true"] {
 QFrame#SectionDivider {
     background: rgba(255,255,255,0.08);
 }
+QFrame#ProfileDivider {
+    background: rgba(255,255,255,0.10);
+}
+QFrame#SettingsDivider {
+    background: rgba(255,255,255,0.10);
+}
+QLabel#ChartPreview {
+    border: none;
+    background: transparent;
+    padding: 2px;
+}
 QFrame#Rail {
     background: #151A22;
     border: 1px solid #2A3342;
@@ -203,18 +214,18 @@ QPushButton#Tiny:hover {
     background: #202938;
 }
 QPushButton#HeroButton {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6366F1, stop:1 #5458E8);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #5F63E8, stop:1 #565BD9);
     color: #FFFFFF;
-    border: none;
+    border: 1px solid rgba(255,255,255,0.12);
     border-radius: 14px;
     font-weight: 700;
     padding: 12px 22px;
 }
 QPushButton#HeroButton:hover {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6F72F4, stop:1 #5C60EA);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #666AEC, stop:1 #5C61DD);
 }
 QPushButton#HeroButton:pressed {
-    background: #4F46E5;
+    background: #5056CF;
 }
 QPushButton#RailButton {
     background: transparent;
@@ -334,6 +345,25 @@ QProgressBar::chunk {
     background: #61D394;
     border-radius: 5px;
 }
+QScrollBar:vertical {
+    background: transparent;
+    width: 12px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical {
+    background: #334155;
+    border-radius: 6px;
+    min-height: 36px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #475569;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent;
+}
 """
 
 LIGHT_STYLE_SHEET = BASE_STYLE_SHEET + """
@@ -393,6 +423,17 @@ QFrame#Panel[flat_section="true"] {
 }
 QFrame#SectionDivider {
     background: #E5E7EB;
+}
+QFrame#ProfileDivider {
+    background: #E5E7EB;
+}
+QFrame#SettingsDivider {
+    background: #E5E7EB;
+}
+QLabel#ChartPreview {
+    border: none;
+    background: transparent;
+    padding: 2px;
 }
 QFrame#Rail {
     background: #F7F8FC;
@@ -539,18 +580,18 @@ QPushButton#Tiny:hover {
     background: #F3F4F6;
 }
 QPushButton#HeroButton {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6366F1, stop:1 #5458E8);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6366F1, stop:1 #5A5EE1);
     color: #FFFFFF;
-    border: none;
+    border: 1px solid #C9CCFF;
     border-radius: 14px;
     font-weight: 700;
     padding: 12px 22px;
 }
 QPushButton#HeroButton:hover {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6F72F4, stop:1 #5C60EA);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6A6DEE, stop:1 #6064E4);
 }
 QPushButton#HeroButton:pressed {
-    background: #4F46E5;
+    background: #5459D8;
 }
 QPushButton#RailButton {
     background: transparent;
@@ -676,21 +717,206 @@ QProgressBar::chunk {
     background: #2F9E66;
     border-radius: 5px;
 }
+QScrollBar:vertical {
+    background: transparent;
+    width: 12px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical {
+    background: #C7D2E0;
+    border-radius: 6px;
+    min-height: 36px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #94A3B8;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent;
+}
 """
 
 
-def apply_theme(app: QApplication, theme: str = "dark") -> None:
-    if theme == "light":
-        _apply_light_theme(app)
+RADIUS_PRESETS = {
+    "soft": {
+        "panel": 18,
+        "rail": 22,
+        "insight": 16,
+        "control": 12,
+        "input": 16,
+        "chip": 12,
+        "hero": 16,
+        "icon": 12,
+    },
+    "medium": {
+        "panel": 16,
+        "rail": 18,
+        "insight": 14,
+        "control": 10,
+        "input": 14,
+        "chip": 10,
+        "hero": 14,
+        "icon": 10,
+    },
+    "hard": {
+        "panel": 10,
+        "rail": 14,
+        "insight": 10,
+        "control": 8,
+        "input": 10,
+        "chip": 8,
+        "hero": 10,
+        "icon": 8,
+    },
+}
+
+
+def _appearance_overrides(theme: str, corner_radius: str, button_style: str) -> str:
+    radius = RADIUS_PRESETS.get(corner_radius, RADIUS_PRESETS["medium"])
+    is_light = theme == "light"
+
+    if is_light:
+        button_base = "#F8FAFC"
+        button_hover = "#F3F4F6"
+        button_border = "#DDE5F0"
+        button_text = "#374151"
+        ghost_bg = "#F8FAFC"
+        ghost_hover = "#F3F4F6"
+        primary_bg = "#6366F1"
+        primary_hover = "#6A6DEE"
+        hero_bg = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6366F1, stop:1 #5A5EE1)"
+        hero_hover = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6A6DEE, stop:1 #6064E4)"
     else:
-        _apply_dark_theme(app)
+        button_base = "#1F2937"
+        button_hover = "#263244"
+        button_border = "rgba(255,255,255,0.12)"
+        button_text = "#F3F4F6"
+        ghost_bg = "rgba(255,255,255,0.03)"
+        ghost_hover = "rgba(255,255,255,0.07)"
+        primary_bg = "#6366F1"
+        primary_hover = "#6B6EF5"
+        hero_bg = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6366F1, stop:1 #565BD9)"
+        hero_hover = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6B6EF5, stop:1 #5F63E8)"
+
+    if button_style == "solid":
+        ghost_bg = "#EEF2FF" if is_light else "#1E1B4B"
+        ghost_hover = "#E0E7FF" if is_light else "#28206A"
+        button_base = "#EEF2FF" if is_light else "#1E1B4B"
+        button_hover = "#E0E7FF" if is_light else "#28206A"
+        button_border = "#C7D2FE" if is_light else "rgba(129,140,248,0.38)"
+        button_text = "#312E81" if is_light else "#EEF2FF"
+    elif button_style == "minimal":
+        ghost_bg = "transparent"
+        ghost_hover = "rgba(99,102,241,0.08)" if is_light else "rgba(99,102,241,0.14)"
+        button_base = "transparent"
+        button_hover = ghost_hover
+        button_border = "#E5E7EB" if is_light else "rgba(255,255,255,0.10)"
+        button_text = "#374151" if is_light else "#D1D5DB"
+        primary_bg = "#4F46E5"
+        primary_hover = "#5B55E8"
+        hero_bg = "#5B5FE8"
+        hero_hover = "#6366F1"
+
+    return f"""
+QFrame#Panel {{
+    border-radius: {radius["panel"]}px;
+}}
+QFrame#Rail {{
+    border-radius: {radius["rail"]}px;
+}}
+QFrame#InsightPanel {{
+    border-radius: {radius["insight"]}px;
+}}
+QFrame#InputBox,
+QFrame#ResponseBox,
+QTextEdit#ExpertContext,
+QFrame#DropZone {{
+    border-radius: {radius["input"]}px;
+}}
+QLabel#StatusPill,
+QLabel#InsightChip,
+QLabel#InsightSource {{
+    border-radius: {radius["chip"]}px;
+}}
+QPushButton,
+QToolButton {{
+    border-radius: {radius["control"]}px;
+}}
+QPushButton#Ghost,
+QPushButton#Tiny,
+QToolButton#SectionToggle {{
+    border-radius: {radius["control"]}px;
+}}
+QPushButton#HeroButton {{
+    border-radius: {radius["hero"]}px;
+}}
+QPushButton#RailButton,
+QPushButton#IconButton {{
+    border-radius: {radius["icon"]}px;
+}}
+QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
+    border-radius: {radius["input"]}px;
+}}
+QPushButton {{
+    background: {button_base};
+    color: {button_text};
+    border-color: {button_border};
+}}
+QPushButton:hover {{
+    background: {button_hover};
+}}
+QPushButton#Primary {{
+    background: {primary_bg};
+    border-color: {primary_bg};
+    color: #FFFFFF;
+}}
+QPushButton#Primary:hover {{
+    background: {primary_hover};
+    border-color: {primary_hover};
+}}
+QPushButton#Ghost,
+QPushButton#Tiny {{
+    background: {ghost_bg};
+    color: {button_text};
+    border-color: {button_border};
+}}
+QPushButton#Ghost:hover,
+QPushButton#Tiny:hover {{
+    background: {ghost_hover};
+}}
+QPushButton#HeroButton {{
+    background: {hero_bg};
+}}
+QPushButton#HeroButton:hover {{
+    background: {hero_hover};
+}}
+"""
+
+
+def _theme_style_sheet(theme: str, corner_radius: str, button_style: str) -> str:
+    base = LIGHT_STYLE_SHEET if theme == "light" else DARK_STYLE_SHEET
+    return base + _appearance_overrides(theme, corner_radius, button_style)
+
+
+def apply_theme(
+    app: QApplication,
+    theme: str = "dark",
+    corner_radius: str = "medium",
+    button_style: str = "soft",
+) -> None:
+    if theme == "light":
+        _apply_light_theme(app, corner_radius, button_style)
+    else:
+        _apply_dark_theme(app, corner_radius, button_style)
 
 
 def apply_dark_theme(app: QApplication) -> None:
     apply_theme(app, "dark")
 
 
-def _apply_dark_theme(app: QApplication) -> None:
+def _apply_dark_theme(app: QApplication, corner_radius: str = "medium", button_style: str = "soft") -> None:
     palette = QPalette()
     palette.setColor(QPalette.ColorRole.Window, QColor("#0B1020"))
     palette.setColor(QPalette.ColorRole.WindowText, QColor("#F3F4F6"))
@@ -704,10 +930,10 @@ def _apply_dark_theme(app: QApplication) -> None:
     palette.setColor(QPalette.ColorRole.Highlight, QColor("#6366F1"))
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
     app.setPalette(palette)
-    app.setStyleSheet(DARK_STYLE_SHEET)
+    app.setStyleSheet(_theme_style_sheet("dark", corner_radius, button_style))
 
 
-def _apply_light_theme(app: QApplication) -> None:
+def _apply_light_theme(app: QApplication, corner_radius: str = "medium", button_style: str = "soft") -> None:
     palette = QPalette()
     palette.setColor(QPalette.ColorRole.Window, QColor("#F5F7FB"))
     palette.setColor(QPalette.ColorRole.WindowText, QColor("#111827"))
@@ -721,4 +947,4 @@ def _apply_light_theme(app: QApplication) -> None:
     palette.setColor(QPalette.ColorRole.Highlight, QColor("#6366F1"))
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
     app.setPalette(palette)
-    app.setStyleSheet(LIGHT_STYLE_SHEET)
+    app.setStyleSheet(_theme_style_sheet("light", corner_radius, button_style))

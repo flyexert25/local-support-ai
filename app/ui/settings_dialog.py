@@ -1,12 +1,13 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPixmap
+from PyQt6.QtCore import QByteArray, QSize, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap, QResizeEvent
+from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -68,6 +69,8 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(self._build_styles_tab(), "Мой стиль общения")
         self.tabs.addTab(self._scrollable(self._build_analytics_tab()), "Аналитика")
         self.tabs.addTab(self._scrollable(self._build_diagnostics_tab()), "Диагностика")
+        self._apply_tab_icons()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         save_button = QPushButton("Сохранить")
         save_button.setObjectName("Primary")
@@ -85,6 +88,26 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.tabs, 1)
         layout.addLayout(footer)
         self._load_styles()
+
+    def _render_icon(self, name: str, size: int = 16) -> QIcon:
+        icon_path = Path(__file__).resolve().parents[2] / "assets" / "icons" / f"{name}.svg"
+        color = "#111827" if self.settings.values.theme == "light" else "#E5E7EB"
+        svg_text = icon_path.read_text(encoding="utf-8").replace("currentColor", color)
+        renderer = QSvgRenderer(QByteArray(svg_text.encode("utf-8")))
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _apply_tab_icons(self) -> None:
+        self.tabs.setIconSize(QSize(16, 16))
+        self.tabs.setTabIcon(0, self._render_icon("settings"))
+        self.tabs.setTabIcon(1, self._render_icon("palette"))
+        self.tabs.setTabIcon(2, self._render_icon("bookmark"))
+        self.tabs.setTabIcon(3, self._render_icon("analytics"))
+        self.tabs.setTabIcon(4, self._render_icon("pulse"))
 
     def _scrollable(self, page: QWidget) -> QScrollArea:
         area = QScrollArea()
@@ -108,7 +131,7 @@ class SettingsDialog(QDialog):
         device_index = self.generation_device.findData(getattr(self.settings.values, "generation_device", "auto"))
         self.generation_device.setCurrentIndex(max(device_index, 0))
         self.mode_text_only = QRadioButton("Только текст")
-        self.mode_vision_auto = QRadioButton("Текст + локальная vision-модель")
+        self.mode_vision_auto = QRadioButton("Текст + скриншот")
         self.processing_mode_group = QButtonGroup(self)
         self.processing_mode_group.setExclusive(True)
         self.processing_mode_group.addButton(self.mode_text_only)
@@ -126,22 +149,18 @@ class SettingsDialog(QDialog):
         self.mode_text_only.toggled.connect(self._sync_processing_mode_controls)
         self.mode_vision_auto.toggled.connect(self._sync_processing_mode_controls)
 
-        self.always_on_top = ToggleSwitch()
-        self.always_on_top.setChecked(self.settings.values.always_on_top)
-        self.compact_mode = ToggleSwitch()
-        self.compact_mode.setChecked(self.settings.values.compact_mode)
         self.network_disabled = ToggleSwitch()
         self.network_disabled.setChecked(self.settings.values.network_disabled)
 
         root.addWidget(
             self._section(
-                "Локальная модель",
+                "Модель",
                 "Ollama используется только через localhost. Данные не отправляются в cloud API.",
                 [
-                    self._field_row("Адрес Ollama", "Обычно http://localhost:11434", self.ollama_url),
-                    self._field_row("Модель по умолчанию", "Например qwen2.5vl:latest", self.preferred_model),
+                    self._field_row("Ollama URL", "Обычно http://localhost:11434", self.ollama_url),
+                    self._field_row("Модель", "Например qwen2.5vl:latest", self.preferred_model),
                     self._field_row(
-                        "Устройство генерации",
+                        "Устройство",
                         "Авто обычно лучше: Ollama сама использует GPU, если он доступен. CPU полезен для стабильности или тестов.",
                         self.generation_device,
                     ),
@@ -150,46 +169,36 @@ class SettingsDialog(QDialog):
         )
         root.addWidget(
             self._section(
-                "Обработка обращений",
-                "Выберите, как приложение будет использовать текст и скриншоты. Если скриншот не нужен, быстрый текстовый режим делает интерфейс чище.",
+                "Режим обработки",
+                "Выберите формат работы с контекстом.",
                 [
                     self._radio_row(
                         self.mode_text_only,
-                        "Быстрый режим для случаев, когда вы вставляете сообщение вручную. Превью скриншота скрывается, изображение не отправляется в модель.",
+                        "Быстрый режим: только вставленный текст, без изображения.",
                     ),
                     self._radio_row(
                         self.mode_vision_auto,
-                        "Обычный режим: если скриншот загружен, Qwen Vision прочитает его через локальный Ollama. Если скриншота нет, ответ строится по тексту.",
+                        "Если добавлен скриншот, он учитывается в локальной модели.",
                     ),
                 ],
             )
         )
         root.addWidget(
             self._section(
-                "OCR для скриншотов",
-                "OCR нужен только если хотите отдельно получить редактируемый текст со скриншота. Для Qwen Vision он не обязателен.",
+                "OCR",
+                "Дополнительное распознавание текста со скриншота.",
                 [
-                    self._toggle_row("Использовать OCR", "Включает кнопку «Анализировать» и локальное распознавание скриншотов.", self.use_ocr),
+                    self._toggle_row("Включить OCR", "Добавляет локальное распознавание текста с изображения.", self.use_ocr),
                     self._field_row("OCR-движок", "EasyOCR проще подготовить, PaddleOCR можно поставить отдельно.", self.ocr_engine),
                 ],
             )
         )
         root.addWidget(
             self._section(
-                "Окно",
-                "Настройки поведения приложения во время ежедневной работы.",
-                [
-                    self._toggle_row("Поверх всех окон", "Удобно, если приложение работает рядом с CRM или чатом.", self.always_on_top),
-                    self._toggle_row("Компактный режим", "Уменьшает окно до более плотного рабочего вида.", self.compact_mode),
-                ],
-            )
-        )
-        root.addWidget(
-            self._section(
-                "Приватность",
+                "Сеть и приватность",
                 "В обычном режиме разрешён только localhost. В строгом режиме блокируются любые сетевые подключения, включая Ollama.",
                 [
-                    self._toggle_row("Заблокировать любые сетевые подключения", "Максимальная изоляция. Генерация через Ollama будет недоступна, пока тумблер включён.", self.network_disabled),
+                    self._toggle_row("Только localhost", "Максимальная изоляция. Внешняя сеть блокируется, включая Ollama не на localhost.", self.network_disabled),
                 ],
             )
         )
@@ -205,6 +214,24 @@ class SettingsDialog(QDialog):
 
         self.light_theme = ToggleSwitch()
         self.light_theme.setChecked(self.settings.values.theme == "light")
+        self.always_on_top = ToggleSwitch()
+        self.always_on_top.setChecked(self.settings.values.always_on_top)
+        self.compact_mode = ToggleSwitch()
+        self.compact_mode.setChecked(self.settings.values.compact_mode)
+
+        self.corner_radius = QComboBox()
+        self.corner_radius.addItem("Soft — мягкие углы", "soft")
+        self.corner_radius.addItem("Medium — сбалансировано", "medium")
+        self.corner_radius.addItem("Hard — строже и компактнее", "hard")
+        radius_index = self.corner_radius.findData(getattr(self.settings.values, "corner_radius", "medium"))
+        self.corner_radius.setCurrentIndex(max(radius_index, 0))
+
+        self.button_style = QComboBox()
+        self.button_style.addItem("Soft — спокойные кнопки", "soft")
+        self.button_style.addItem("Solid — заметнее действия", "solid")
+        self.button_style.addItem("Minimal — почти без заливки", "minimal")
+        button_index = self.button_style.findData(getattr(self.settings.values, "button_style", "soft"))
+        self.button_style.setCurrentIndex(max(button_index, 0))
 
         root.addWidget(
             self._section(
@@ -221,11 +248,21 @@ class SettingsDialog(QDialog):
         )
         root.addWidget(
             self._section(
-                "Стиль интерфейса",
-                "Приложение сделано как рабочий инструмент поддержки: без маркетинговых экранов, лишних иллюстраций и визуального шума.",
+                "Интерфейс",
+                "Поведение окна и плотность ежедневной работы.",
                 [
-                    self._preview_row("Основной экран", "Скриншот, текст обращения, OCR и готовый ответ остаются на одном рабочем поле."),
-                    self._preview_row("Настройки", "Технические параметры сгруппированы в понятные секции с тумблерами."),
+                    self._toggle_row("Поверх всех окон", "Удобно, если приложение работает рядом с CRM или чатом.", self.always_on_top),
+                    self._toggle_row("Компактное окно", "Уменьшает окно до более плотного рабочего вида.", self.compact_mode),
+                ],
+            )
+        )
+        root.addWidget(
+            self._section(
+                "Визуальные детали",
+                "Небольшие настройки, которые меняют характер интерфейса без лишнего шума.",
+                [
+                    self._field_row("Скругление", "Soft выглядит мягче, Hard делает интерфейс строже.", self.corner_radius),
+                    self._field_row("Стиль кнопок", "Выберите, насколько заметными должны быть вторичные действия.", self.button_style),
                 ],
             )
         )
@@ -287,9 +324,30 @@ class SettingsDialog(QDialog):
         examples_layout.setContentsMargins(0, 0, 0, 0)
         examples_layout.addWidget(self.style_examples)
         self.style_examples_container.setVisible(False)
-        self.style_profile = QLabel()
-        self.style_profile.setObjectName("Subtle")
-        self.style_profile.setWordWrap(True)
+        self.style_profile_panel = QFrame()
+        self.style_profile_panel.setObjectName("Panel")
+        profile_layout = QVBoxLayout(self.style_profile_panel)
+        profile_layout.setContentsMargins(12, 10, 12, 10)
+        profile_layout.setSpacing(6)
+        self.profile_tone_value = QLabel("—")
+        self.profile_length_value = QLabel("—")
+        self.profile_format_value = QLabel("—")
+        self.profile_phrases_value = QLabel("—")
+        for label in [
+            self.profile_tone_value,
+            self.profile_length_value,
+            self.profile_format_value,
+            self.profile_phrases_value,
+        ]:
+            label.setObjectName("Subtle")
+            label.setWordWrap(True)
+        profile_layout.addWidget(self._profile_row("Тон", self.profile_tone_value))
+        profile_layout.addWidget(self._profile_divider())
+        profile_layout.addWidget(self._profile_row("Длина", self.profile_length_value))
+        profile_layout.addWidget(self._profile_divider())
+        profile_layout.addWidget(self._profile_row("Формат", self.profile_format_value))
+        profile_layout.addWidget(self._profile_divider())
+        profile_layout.addWidget(self._profile_row("Типичные фразы", self.profile_phrases_value))
         train_button = QPushButton("Обучить стиль")
         train_button.setObjectName("Primary")
         train_button.clicked.connect(self._train_style)
@@ -304,7 +362,7 @@ class SettingsDialog(QDialog):
         examples_header.addWidget(self.style_examples_state)
         right.addLayout(examples_header)
         right.addWidget(self.style_examples_container)
-        right.addWidget(self.style_profile)
+        right.addWidget(self.style_profile_panel)
         right.addWidget(train_button)
         right.addStretch(1)
 
@@ -312,102 +370,101 @@ class SettingsDialog(QDialog):
         root.addWidget(right_panel, 3)
         return page
 
+    def _profile_row(self, title: str, value: QLabel) -> QWidget:
+        row = QWidget()
+        layout = QVBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-weight: 600;")
+        layout.addWidget(title_label)
+        layout.addWidget(value)
+        return row
+
+    @staticmethod
+    def _profile_divider() -> QFrame:
+        line = QFrame()
+        line.setObjectName("ProfileDivider")
+        line.setFixedHeight(1)
+        return line
+
     def _build_analytics_tab(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(14)
 
-        total = self.analytics.total_generated()
-        average_generation_ms = self.analytics.average_generation_ms()
-        average_ocr_ms = self.analytics.average_stage_ms("ocr_ms")
-        average_analyze_ms = self.analytics.average_stage_ms("analyze_ms")
-        average_preview_ms = self.analytics.average_stage_ms("preview_ms")
-        slowest_generation_ms = self.analytics.slowest_generation_ms()
-        ocr_feedback = self.analytics.ocr_feedback_totals()
-        response_feedback = self.analytics.response_feedback_totals()
-        ocr_accuracy = (
-            round(ocr_feedback["correct_count"] / ocr_feedback["total"] * 100)
-            if ocr_feedback["total"]
-            else 0
-        )
-        response_accuracy = (
-            round(response_feedback["correct_count"] / response_feedback["total"] * 100)
-            if response_feedback["total"]
-            else 0
-        )
-        topic_rows = [
-            self._metric_row(topic, f"{count} ответ(ов)")
-            for topic, count in self.analytics.top_topics()
-        ]
-        if not topic_rows:
-            topic_rows = [self._preview_row("Пока нет данных", "Сгенерируйте несколько ответов, и здесь появятся частые темы.")]
-
-        recent_rows = []
-        for item in self.analytics.recent_cases():
-            signals = Database.decode_json(item["signals_json"]).get("signals") or []
-            extracted = Database.decode_json(item["extracted_json"])
-            details: list[str] = []
-            if signals:
-                details.append("признаки: " + ", ".join(map(str, signals[:4])))
-            if extracted.get("amounts"):
-                details.append("суммы: " + ", ".join(extracted["amounts"][:3]))
-            if extracted.get("dates"):
-                details.append("даты: " + ", ".join(extracted["dates"][:3]))
-            if extracted.get("mcc_codes"):
-                details.append("MCC: " + ", ".join(extracted["mcc_codes"][:4]))
-            recent_rows.append(
-                self._preview_row(
-                    f"{item['topic']} · {item['created_at']}",
-                    "; ".join(details) if details else "без выделенных признаков",
-                )
-            )
-        if not recent_rows:
-            recent_rows = [self._preview_row("История пуста", "Аналитика начнёт собираться после генерации ответов.")]
-
+        self.analytics_refresh_button = QPushButton("Обновить")
+        self.analytics_refresh_button.clicked.connect(self._refresh_analytics_preview)
         export_button = QPushButton("Выгрузить диаграмму")
         export_button.setObjectName("Primary")
         export_button.clicked.connect(self._export_analytics_chart)
-        root.addWidget(export_button, 0, Qt.AlignmentFlag.AlignLeft)
-        root.addWidget(
-            self._section(
-                "Сводка",
-                "Локальная статистика по ответам, сохранённая в SQLite.",
-                [
-                    self._metric_row("Сгенерировано ответов", str(total)),
-                    self._metric_row("Средний OCR SLA", self._format_duration(average_ocr_ms)),
-                    self._metric_row("Средний Analyze SLA", self._format_duration(average_analyze_ms)),
-                    self._metric_row("Средний Preview SLA", self._format_duration(average_preview_ms)),
-                    self._metric_row("Среднее SLA генерации", self._format_duration(average_generation_ms)),
-                    self._metric_row("Самая долгая генерация", self._format_duration(slowest_generation_ms)),
-                    self._metric_row("OCR проверено", str(ocr_feedback["total"])),
-                    self._metric_row("OCR без правок", str(ocr_feedback["correct_count"])),
-                    self._metric_row("OCR исправлено", str(ocr_feedback["corrected_count"])),
-                    self._metric_row("Точность OCR", f"{ocr_accuracy}%"),
-                    self._metric_row("Ответов проверено", str(response_feedback["total"])),
-                    self._metric_row("Ответов без правок", str(response_feedback["correct_count"])),
-                    self._metric_row("Ответов исправлено", str(response_feedback["corrected_count"])),
-                    self._metric_row("Точность ответа", f"{response_accuracy}%"),
-                ],
-            )
+
+        actions = QHBoxLayout()
+        actions.addWidget(self.analytics_refresh_button)
+        actions.addWidget(export_button)
+        actions.addStretch(1)
+        root.addLayout(actions)
+
+        self.analytics_overview_section = self._section(
+            "Сводка",
+            "Ключевые метрики по локальной генерации и качеству ответа.",
+            [],
         )
-        root.addWidget(
-            self._section(
-                "Частые темы",
-                "Темы определяются локально по правилам и регулярным выражениям.",
-                topic_rows,
-            )
+        self.analytics_overview_toggle = self._make_section_toggle("Сводка")
+        self.analytics_overview_toggle.setChecked(True)
+        self.analytics_overview_toggle.setArrowType(Qt.ArrowType.DownArrow)
+        self.analytics_overview_toggle.clicked.connect(
+            lambda: self._toggle_collapsible(self.analytics_overview_toggle, self.analytics_overview_section)
         )
-        root.addWidget(
-            self._section(
-                "Последние признаки",
-                "Что анализатор выделил в последних обращениях: суммы, даты, MCC-коды и сигналы.",
-                recent_rows,
-            )
+        root.addWidget(self.analytics_overview_toggle)
+        root.addWidget(self.analytics_overview_section)
+
+        chart_section = QFrame()
+        chart_section.setObjectName("Panel")
+        chart_layout = QVBoxLayout(chart_section)
+        chart_layout.setContentsMargins(14, 12, 14, 12)
+        chart_layout.setSpacing(8)
+        chart_title = QLabel("Онлайн-диаграмма тем")
+        chart_title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        chart_hint = QLabel("Автоматически обновляется из локальной базы SQLite.")
+        chart_hint.setObjectName("Subtle")
+
+        self.analytics_chart_preview = QLabel()
+        self.analytics_chart_preview.setObjectName("ChartPreview")
+        self.analytics_chart_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.analytics_chart_preview.setMinimumHeight(360)
+
+        chart_layout.addWidget(chart_title)
+        chart_layout.addWidget(chart_hint)
+        chart_layout.addWidget(self.analytics_chart_preview)
+        self.analytics_chart_toggle = self._make_section_toggle("Онлайн-диаграмма")
+        self.analytics_chart_toggle.setChecked(True)
+        self.analytics_chart_toggle.setArrowType(Qt.ArrowType.DownArrow)
+        self.analytics_chart_toggle.clicked.connect(
+            lambda: self._toggle_collapsible(self.analytics_chart_toggle, chart_section)
         )
+        root.addWidget(self.analytics_chart_toggle)
+        root.addWidget(chart_section)
+
+        self.analytics_recent_section = self._section(
+            "Последние признаки",
+            "Короткая история последних обращений.",
+            [],
+        )
+        self.analytics_recent_toggle = self._make_section_toggle("Последние признаки")
+        self.analytics_recent_toggle.setChecked(False)
+        self.analytics_recent_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.analytics_recent_section.setVisible(False)
+        self.analytics_recent_toggle.clicked.connect(
+            lambda: self._toggle_collapsible(self.analytics_recent_toggle, self.analytics_recent_section)
+        )
+        root.addWidget(self.analytics_recent_toggle)
+        root.addWidget(self.analytics_recent_section)
+
+        self._refresh_analytics_preview()
         root.addStretch(1)
         return page
-
     def _build_diagnostics_tab(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
@@ -435,8 +492,34 @@ class SettingsDialog(QDialog):
             [],
         )
 
+        self.diag_runtime_toggle = self._make_section_toggle("Состояние системы")
+        self.diag_runtime_toggle.setChecked(True)
+        self.diag_runtime_toggle.setArrowType(Qt.ArrowType.DownArrow)
+        self.diag_runtime_toggle.clicked.connect(
+            lambda: self._toggle_collapsible(self.diag_runtime_toggle, self.diagnostics_runtime_section)
+        )
+        self.diag_storage_toggle = self._make_section_toggle("Локальные пути")
+        self.diag_storage_toggle.setChecked(False)
+        self.diag_storage_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.diagnostics_storage_section.setVisible(False)
+        self.diag_storage_toggle.clicked.connect(
+            lambda: self._toggle_collapsible(self.diag_storage_toggle, self.diagnostics_storage_section)
+        )
+        self.diag_perf_toggle = self._make_section_toggle("Быстрая сводка")
+        self.diag_perf_toggle.setChecked(False)
+        self.diag_perf_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.diagnostics_performance_section.setVisible(False)
+        self.diag_perf_toggle.clicked.connect(
+            lambda: self._toggle_collapsible(self.diag_perf_toggle, self.diagnostics_performance_section)
+        )
+
+        root.addWidget(self.diag_runtime_toggle)
         root.addWidget(self.diagnostics_runtime_section)
+        root.addWidget(self._settings_divider())
+        root.addWidget(self.diag_storage_toggle)
         root.addWidget(self.diagnostics_storage_section)
+        root.addWidget(self._settings_divider())
+        root.addWidget(self.diag_perf_toggle)
         root.addWidget(self.diagnostics_performance_section)
         root.addStretch(1)
 
@@ -471,6 +554,29 @@ class SettingsDialog(QDialog):
                 widget.deleteLater()
         for row in rows:
             layout.addWidget(row)
+
+    def _make_section_toggle(self, title: str) -> QToolButton:
+        btn = QToolButton()
+        btn.setObjectName("SectionToggle")
+        btn.setText(title)
+        btn.setCheckable(True)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setMinimumHeight(34)
+        btn.setMinimumWidth(180)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        return btn
+
+    def _toggle_collapsible(self, button: QToolButton, target: QWidget) -> None:
+        expanded = button.isChecked()
+        target.setVisible(expanded)
+        button.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+
+    @staticmethod
+    def _settings_divider() -> QFrame:
+        line = QFrame()
+        line.setObjectName("SettingsDivider")
+        line.setFixedHeight(1)
+        return line
 
     def _refresh_diagnostics(self) -> None:
         ollama_status = self.ai_manager.check_status()
@@ -521,9 +627,138 @@ class SettingsDialog(QDialog):
             self._metric_row("Языки OCR", ", ".join(self.settings.values.ocr_languages)),
         ]
 
-        self._replace_section_rows(self.diagnostics_runtime_section, runtime_rows)
-        self._replace_section_rows(self.diagnostics_storage_section, storage_rows)
-        self._replace_section_rows(self.diagnostics_performance_section, performance_rows)
+        self._replace_section_rows(self.diagnostics_runtime_section, self._rows_with_dividers(runtime_rows))
+        self._replace_section_rows(self.diagnostics_storage_section, self._rows_with_dividers(storage_rows))
+        self._replace_section_rows(self.diagnostics_performance_section, self._rows_with_dividers(performance_rows))
+
+    def _refresh_analytics_preview(self) -> None:
+        total = self.analytics.total_generated()
+        average_generation_ms = self.analytics.average_generation_ms()
+        average_ocr_ms = self.analytics.average_stage_ms("ocr_ms")
+        average_analyze_ms = self.analytics.average_stage_ms("analyze_ms")
+        slowest_generation_ms = self.analytics.slowest_generation_ms()
+        response_feedback = self.analytics.response_feedback_totals()
+        response_accuracy = (
+            round(response_feedback["correct_count"] / response_feedback["total"] * 100)
+            if response_feedback["total"]
+            else 0
+        )
+
+        overview_rows = [
+            self._metric_row("Ответов всего", str(total)),
+            self._metric_row("Средний SLA (генерация)", self._format_duration(average_generation_ms)),
+            self._metric_row("Средний SLA (OCR)", self._format_duration(average_ocr_ms)),
+            self._metric_row("Средний SLA (Analyze)", self._format_duration(average_analyze_ms)),
+            self._metric_row("Точность ответа", f"{response_accuracy}%"),
+            self._metric_row("Пиковое SLA", self._format_duration(slowest_generation_ms)),
+        ]
+        self._replace_section_rows(self.analytics_overview_section, self._rows_with_dividers(overview_rows))
+
+        topics = self.analytics.top_topics(limit=8)
+        self._refresh_analytics_chart_only(topics)
+
+        recent_rows = []
+        for item in self.analytics.recent_cases():
+            signals = Database.decode_json(item["signals_json"]).get("signals") or []
+            extracted = Database.decode_json(item["extracted_json"])
+            details: list[str] = []
+            if signals:
+                details.append(", ".join(map(str, signals[:3])))
+            if extracted.get("amounts"):
+                details.append("суммы: " + ", ".join(extracted["amounts"][:2]))
+            if extracted.get("dates"):
+                details.append("даты: " + ", ".join(extracted["dates"][:2]))
+            recent_rows.append(
+                self._preview_row(
+                    f"{item['topic']} · {item['created_at']}",
+                    "; ".join(details) if details else "без деталей",
+                )
+            )
+        if not recent_rows:
+            recent_rows = [self._preview_row("История пуста", "Появится после первых генераций.")]
+        self._replace_section_rows(self.analytics_recent_section, self._rows_with_dividers(recent_rows))
+
+    def _refresh_analytics_chart_only(self, topics: list[tuple[str, int]] | None = None) -> None:
+        if not hasattr(self, "analytics_chart_preview"):
+            return
+        if topics is None:
+            topics = self.analytics.top_topics(limit=8)
+        preview_width = max(520, self.analytics_chart_preview.width() - 12)
+        self.analytics_chart_preview.setPixmap(self._build_topics_preview_pixmap(topics, preview_width))
+
+    def _build_topics_preview_pixmap(self, topics: list[tuple[str, int]], width: int) -> QPixmap:
+        height = 320
+        is_light = self.settings.values.theme == "light"
+        bg = QColor("#FFFFFF" if is_light else "#111827")
+        text = QColor("#111827" if is_light else "#F3F4F6")
+        subtle = QColor("#6B7280" if is_light else "#9CA3AF")
+        rail = QColor("#E5E7EB" if is_light else "#253046")
+        bar = QColor("#6366F1")
+        border = QColor("#E5E7EB" if is_light else "#2B3548")
+
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        try:
+            painter.setPen(border)
+            painter.setBrush(bg)
+            painter.drawRoundedRect(0, 0, width - 1, height - 1, 12, 12)
+
+            if not topics:
+                painter.setPen(subtle)
+                painter.setFont(QFont("Segoe UI", 11))
+                painter.drawText(24, 170, "Недостаточно данных для диаграммы")
+                return pixmap
+
+            max_count = max(count for _, count in topics) or 1
+            left = 24
+            top = 28
+            row_h = 34
+            bar_x = 290
+            bar_w = width - bar_x - 70
+            painter.setFont(QFont("Segoe UI", 10, QFont.Weight.Medium))
+            for index, (topic, count) in enumerate(topics):
+                y = top + index * row_h
+                label = topic if len(topic) <= 34 else topic[:31] + "..."
+                painter.setPen(text)
+                painter.drawText(left, y + 18, label)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(rail)
+                painter.drawRoundedRect(bar_x, y + 6, bar_w, 14, 7, 7)
+                fill = int(bar_w * (count / max_count))
+                painter.setBrush(bar)
+                painter.drawRoundedRect(bar_x, y + 6, max(fill, 8), 14, 7, 7)
+                painter.setPen(subtle)
+                painter.drawText(bar_x + bar_w + 12, y + 18, str(count))
+        finally:
+            painter.end()
+        return pixmap
+
+    @staticmethod
+    def _rows_with_dividers(rows: list[QWidget]) -> list[QWidget]:
+        if not rows:
+            return rows
+        result: list[QWidget] = []
+        for index, row in enumerate(rows):
+            result.append(row)
+            if index < len(rows) - 1:
+                line = QFrame()
+                line.setObjectName("SettingsDivider")
+                line.setFixedHeight(1)
+                result.append(line)
+        return result
+
+    def _on_tab_changed(self, index: int) -> None:
+        if index == 3:
+            self._refresh_analytics_preview()
+        elif index == 4:
+            self._refresh_diagnostics()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if self.tabs.currentIndex() == 3:
+            self._refresh_analytics_chart_only()
 
     def _toggle_row(self, title: str, subtitle: str, toggle: ToggleSwitch) -> QWidget:
         row = QWidget()
@@ -790,7 +1025,10 @@ class SettingsDialog(QDialog):
         self.current_style_id = None
         self.style_name.setText("Новый стиль")
         self.style_examples.clear()
-        self.style_profile.setText("Добавьте примеры и нажмите «Обучить стиль».")
+        self.profile_tone_value.setText("Добавьте примеры и нажмите «Обучить стиль».")
+        self.profile_length_value.setText("—")
+        self.profile_format_value.setText("—")
+        self.profile_phrases_value.setText("—")
 
     def _train_style(self) -> None:
         try:
@@ -850,6 +1088,8 @@ class SettingsDialog(QDialog):
             generation_device=self.generation_device.currentData() or "auto",
             processing_mode="text_only" if self.mode_text_only.isChecked() else "vision_auto",
             theme="light" if self.light_theme.isChecked() else "dark",
+            corner_radius=self.corner_radius.currentData() or "medium",
+            button_style=self.button_style.currentData() or "soft",
             use_ocr=self.use_ocr.isChecked(),
             ocr_engine=self.ocr_engine.currentText(),
             always_on_top=self.always_on_top.isChecked(),
@@ -870,13 +1110,18 @@ class SettingsDialog(QDialog):
             self.use_ocr.setToolTip("Включает локальное OCR-распознавание для скриншотов.")
 
     def _show_profile(self, profile: dict) -> None:
-        phrases = ", ".join(profile.get("typical_phrases") or [])
-        self.style_profile.setText(
-            f"Тон: {profile.get('tone', 'не определен')}. "
-            f"Длина: {profile.get('avg_sentence_words', 0)} слов/предложение. "
-            f"Формат: {profile.get('paragraph_style', 'не определен')}. "
-            f"Типичные фразы: {phrases or 'пока не выделены'}."
-        )
+        tone = str(profile.get("tone", "не определен"))
+        avg_len = profile.get("avg_sentence_words", 0)
+        paragraph_style = str(profile.get("paragraph_style", "не определен"))
+        phrases = [str(item).strip() for item in (profile.get("typical_phrases") or []) if str(item).strip()]
+
+        self.profile_tone_value.setText(tone)
+        self.profile_length_value.setText(f"{avg_len} слов/предложение")
+        self.profile_format_value.setText(paragraph_style)
+        if phrases:
+            self.profile_phrases_value.setText("\n".join(f"• {item}" for item in phrases[:5]))
+        else:
+            self.profile_phrases_value.setText("Пока не выделены")
 
     def _toggle_style_examples(self) -> None:
         expanded = self.style_examples_toggle.isChecked()

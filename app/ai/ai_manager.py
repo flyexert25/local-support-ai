@@ -236,12 +236,22 @@ class AIManager:
     def _build_knowledge_block(topic_hint: str | None, knowledge_facts: list[str]) -> str:
         clean_facts = [fact.strip() for fact in knowledge_facts if fact and fact.strip()][:2]
         if not topic_hint and not clean_facts:
-            return ""
+            return (
+                "Локальная база знаний:\n"
+                "- Релевантные факты не найдены.\n"
+                "- Не придумывай продуктовые условия, тарифы, сроки, комиссии или правила.\n"
+                "- Если данных недостаточно, ответь осторожно и предложи проверить условия по продукту.\n\n"
+            )
 
         lines = ["Локальная проверка контекста:"]
         if topic_hint:
             lines.append(f"- Проверенная тема: {topic_hint}")
-        for fact in clean_facts:
-            lines.append(f"- Факт: {fact}")
+        if clean_facts:
+            lines.append("- Используй только найденные факты ниже для продуктовых условий.")
+            for fact in clean_facts:
+                lines.append(f"- Факт: {fact}")
+        else:
+            lines.append("- Релевантные факты по теме не найдены.")
+            lines.append("- Не придумывай продуктовые условия; сформулируй ответ как проверку ситуации.")
         lines.append("")
         return "\n".join(lines)

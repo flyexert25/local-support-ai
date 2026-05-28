@@ -545,6 +545,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(recent_styles_card)
         self.recent_styles_card = recent_styles_card
 
+        knowledge_card = self._create_panel("Использованные знания")
+        knowledge_layout = knowledge_card.layout()
+        self.knowledge_status_label = QLabel("Ожидание")
+        self.knowledge_status_label.setObjectName("InsightSource")
+        knowledge_layout.addWidget(self.knowledge_status_label, 0, Qt.AlignmentFlag.AlignLeft)
+        self.knowledge_details_label = QLabel("Факты появятся после подготовки ответа.")
+        self.knowledge_details_label.setObjectName("Subtle")
+        self.knowledge_details_label.setWordWrap(True)
+        knowledge_layout.addWidget(self.knowledge_details_label)
+        layout.addWidget(knowledge_card)
+        self.knowledge_card = knowledge_card
+
         status_card = self._create_panel("Статусы")
         status_layout = status_card.layout()
         self.backend_status_value = self._status_row(status_layout, "Backend")
@@ -999,6 +1011,7 @@ class MainWindow(QMainWindow):
         self._negative_feedback_requested = False
         self.response_text.clear()
         self._reset_stage_metrics()
+        self._show_empty_knowledge()
         self._refresh_response_actions()
 
         if has_image and self.settings.values.use_ocr and not ocr:
@@ -1316,6 +1329,8 @@ class MainWindow(QMainWindow):
         style_profile: dict | None,
         elapsed_ms: float,
         source_label: str = "локально",
+        analysis_payload: dict | None = None,
+        analysis_source: str | None = None,
     ) -> None:
         try:
             self._set_stage_metric("generate_ms", elapsed_ms)
@@ -1325,13 +1340,16 @@ class MainWindow(QMainWindow):
             self.last_generated_style_id = style_id
             self._refresh_response_actions()
 
-            selected_style = self.style_manager.get_style(style_id) if style_id else None
-            analysis = self.case_analyzer.analyze(
-                self.customer_text.toPlainText(),
-                self.ocr_text.toPlainText(),
-                style_profile=style_profile,
-                reply_style_label=selected_style.name if selected_style else None,
-            )
+            if analysis_payload:
+                analysis = self._analysis_from_payload(analysis_payload)
+            else:
+                selected_style = self.style_manager.get_style(style_id) if style_id else None
+                analysis = self.case_analyzer.analyze(
+                    self.customer_text.toPlainText(),
+                    self.ocr_text.toPlainText(),
+                    style_profile=style_profile,
+                    reply_style_label=selected_style.name if selected_style else None,
+                )
             self.database.execute(
                 """
                 INSERT INTO conversations(
@@ -1355,7 +1373,10 @@ class MainWindow(QMainWindow):
                     int(elapsed_ms),
                 ),
             )
-            self._show_case_analysis(analysis, "Локально")
+            if analysis_payload:
+                self._show_analysis_payload(analysis_payload, analysis_source or source_label)
+            else:
+                self._show_case_analysis(analysis, "Локально")
             self._set_status(f"Ответ подготовлен {source_label} • {self._format_duration(elapsed_ms)}")
         except Exception as exc:
             QMessageBox.warning(self, "Ошибка после генерации", str(exc))
@@ -1378,6 +1399,8 @@ class MainWindow(QMainWindow):
             self._worker_failed("FastAPI вернул пустой итоговый ответ.")
             return
         model = str(payload.get("model", "")).strip() or fallback_model
+        self.last_preview_payload = {**(self.last_preview_payload or {}), **payload}
+        self._show_knowledge_payload(payload)
         self._generation_finished(
             response_text,
             model,
@@ -1385,6 +1408,8 @@ class MainWindow(QMainWindow):
             style_profile,
             elapsed_ms,
             source_label="через FastAPI",
+            analysis_payload=payload,
+            analysis_source="FastAPI",
         )
 
     def _backend_generation_failed(
@@ -1674,6 +1699,7 @@ class MainWindow(QMainWindow):
         self.topic_override_container.setVisible(False)
         self.topic_override_combo.setCurrentText("")
         self._refresh_style_summary()
+        self._show_empty_knowledge()
 
     def _show_case_analysis(self, analysis: CaseAnalysis, source: str) -> None:
         self.last_case_analysis = analysis
@@ -1724,7 +1750,7 @@ class MainWindow(QMainWindow):
         self.topic_override_toggle.setEnabled(True)
         self._sync_topic_override_value(analysis.topic)
 
-    def _show_analysis_payload(self, payload: dict, source: str) -> None:
+    def _analysis_from_payload(self, payload: dict) -> CaseAnalysis:
         topic = str(payload.get("topic", "Общее обращение"))
         signals = payload.get("signals", [])
         if not isinstance(signals, list):
@@ -1746,7 +1772,69 @@ class MainWindow(QMainWindow):
             priority=str(payload.get("priority", "Обычный")),
             reply_style_label=str(payload.get("reply_style_label", "")).strip() or self._current_style_name(),
         )
+
+        return analysis
+
+    def _show_analysis_payload(self, payload: dict, source: str) -> None:
+        analysis = self._analysis_from_payload(payload)
         self._show_case_analysis(analysis, source)
+        if "knowledge_matches" in payload or "knowledge_facts" in payload:
+            self._show_knowledge_payload(payload)
+
+    def _show_empty_knowledge(self) -> None:
+        if not hasattr(self, "knowledge_status_label"):
+            return
+        self.knowledge_status_label.setText("Ожидание")
+        self.knowledge_details_label.setText("Факты появятся после подготовки ответа.")
+
+    def _show_knowledge_payload(self, payload: dict) -> None:
+        if not hasattr(self, "knowledge_status_label"):
+            return
+
+        matches = payload.get("knowledge_matches", [])
+        facts = payload.get("knowledge_facts", [])
+        status = str(payload.get("knowledge_status", "")).strip()
+        if not isinstance(matches, list):
+            matches = []
+        if not isinstance(facts, list):
+            facts = []
+
+        clean_facts = [str(item).strip() for item in facts if str(item).strip()][:2]
+        clean_matches = [item for item in matches if isinstance(item, dict)]
+
+        if clean_matches:
+            first = clean_matches[0]
+            title = str(first.get("title", "")).strip() or "Локальная статья"
+            product = str(first.get("product", "")).strip() or "product"
+            score = first.get("score", 0)
+            matched_terms = first.get("matched_terms", [])
+            if not isinstance(matched_terms, list):
+                matched_terms = []
+            terms = ", ".join(str(item) for item in matched_terms[:5])
+            detail_parts = [
+                title,
+                f"Продукт: {product} · score: {score}",
+            ]
+            if clean_facts:
+                detail_parts.append("Факты: " + " ".join(clean_facts))
+            if terms:
+                detail_parts.append("Совпадения: " + terms)
+            self.knowledge_status_label.setText("Факты найдены")
+            self.knowledge_details_label.setText("\n".join(detail_parts))
+            return
+
+        if clean_facts:
+            self.knowledge_status_label.setText("Факты найдены")
+            self.knowledge_details_label.setText("Факты: " + " ".join(clean_facts))
+            return
+
+        if status == "article_without_facts":
+            self.knowledge_status_label.setText("Статья найдена")
+            self.knowledge_details_label.setText("Есть совпадение по статье, но явные факты для ответа не выделены.")
+            return
+
+        self.knowledge_status_label.setText("Факты не найдены")
+        self.knowledge_details_label.setText("Ответ будет осторожнее: без выдуманных условий, сроков и тарифов.")
 
     def _sync_topic_override_value(self, topic: str | None = None) -> None:
         if not self.last_case_analysis:

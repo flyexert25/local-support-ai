@@ -130,21 +130,22 @@ class KnowledgeService:
         matched_terms: set[str] = set()
         for token in query_tokens:
             token_score = 0
-            if token in title_lower:
+            if self._has_token(title_lower, token):
                 token_score += 5
-            if token in tags_blob:
+            if self._has_token(tags_blob, token):
                 token_score += 4
-            if token in examples_blob:
+            if self._has_token(examples_blob, token):
                 token_score += 3
-            if token in facts_blob:
+            if self._has_token(facts_blob, token):
                 token_score += 2
-            if token in summary_lower or token in sections_text:
+            if self._has_token(summary_lower, token) or self._has_token(sections_text, token):
                 token_score += 1
             if token_score:
                 score += token_score
                 matched_terms.add(token)
 
         score += self._topic_boost(topic.lower(), query_text, product, title_lower, tags_blob)
+        selected_facts = self._select_relevant_facts(facts, query_text, query_tokens)
 
         return KnowledgeMatch(
             article_id=str(article.get("id", "")).strip(),
@@ -152,9 +153,57 @@ class KnowledgeService:
             product=product,
             score=score,
             summary=summary,
-            facts=facts[:2],
+            facts=selected_facts,
             matched_terms=sorted(matched_terms),
         )
+
+    def _select_relevant_facts(
+        self,
+        facts: list[str],
+        query_text: str,
+        query_tokens: set[str],
+        limit: int = 4,
+    ) -> list[str]:
+        if not facts:
+            return []
+
+        scored: list[tuple[int, int, str]] = []
+        for index, fact in enumerate(facts):
+            fact_lower = fact.lower()
+            score = 0
+            for token in query_tokens:
+                if self._has_token(fact_lower, token):
+                    score += 3
+
+            score += self._intent_fact_boost(query_text, fact_lower)
+            scored.append((score, index, fact))
+
+        if not any(score for score, _, _ in scored):
+            return facts[:limit]
+
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [fact for score, _, fact in scored if score > 0][:limit] or facts[:limit]
+
+    @staticmethod
+    def _intent_fact_boost(query_text: str, fact_lower: str) -> int:
+        query_text = query_text.replace("ё", "е")
+        fact_lower = fact_lower.replace("ё", "е")
+        score = 0
+        checks = (
+            (("кэшб", "категор", "бонус"), ("кэшб", "категор", "mcc", "бонус"), 6),
+            (("льгот", "минимальн"), ("льгот", "обязательн", "погаш", "долг"), 6),
+            (("процент", "ставк"), ("процент", "ставк", "выплат", "начис"), 5),
+            (("начис", "доход"), ("доход", "остат", "начис"), 5),
+            (("срок", "когда", "дата"), ("срок", "период", "выплат", "дата"), 4),
+            (("досроч", "закрыт", "сня"), ("досроч", "сня", "пополн", "закрыт"), 4),
+            (("комисс", "лимит", "перевод"), ("комисс", "лимит", "перевод", "тариф"), 4),
+        )
+        for query_markers, fact_markers, weight in checks:
+            if any(marker in query_text for marker in query_markers) and any(
+                marker in fact_lower for marker in fact_markers
+            ):
+                score += weight
+        return score
 
     def _topic_boost(
         self,
@@ -188,6 +237,16 @@ class KnowledgeService:
     @staticmethod
     def _extract_tokens(text: str) -> set[str]:
         return {token.lower() for token in TOKEN_RE.findall(text)}
+
+    @staticmethod
+    def _has_token(text: str, token: str) -> bool:
+        text = text.replace("ё", "е")
+        token = token.replace("ё", "е")
+        if token in text:
+            return True
+        if len(token) >= 5 and token[:5] in text:
+            return True
+        return False
 
     @staticmethod
     def _normalize_strings(values: Any, lowercase: bool) -> list[str]:

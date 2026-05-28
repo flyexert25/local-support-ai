@@ -43,6 +43,16 @@ class GeneratePreviewRequest(BaseModel):
     selected_style: str | None = None
 
 
+class KnowledgeMatchResponse(BaseModel):
+    article_id: str
+    title: str
+    product: str
+    score: int
+    summary: str
+    facts: list[str]
+    matched_terms: list[str]
+
+
 class GeneratePreviewResponse(BaseModel):
     customer_text: str
     ocr_text: str | None = None
@@ -59,6 +69,8 @@ class GeneratePreviewResponse(BaseModel):
     quality_rules: list[str]
     knowledge_articles: list[str]
     knowledge_facts: list[str]
+    knowledge_matches: list[KnowledgeMatchResponse]
+    knowledge_status: str
     draft_reply: str
 
 
@@ -82,6 +94,8 @@ class GenerateFinalResponse(BaseModel):
     reply_style_label: str | None = None
     knowledge_articles: list[str]
     knowledge_facts: list[str]
+    knowledge_matches: list[KnowledgeMatchResponse]
+    knowledge_status: str
 
 
 @app.get("/")
@@ -154,12 +168,7 @@ def generate_preview(data: GeneratePreviewRequest):
         for line in quality_rules_raw.splitlines()
         if line.strip()
     ]
-    knowledge_titles = [match.title for match in knowledge_matches]
-    knowledge_facts: list[str] = []
-    for match in knowledge_matches:
-        for fact in match.facts:
-            if fact and fact not in knowledge_facts:
-                knowledge_facts.append(fact)
+    knowledge_titles, knowledge_facts, knowledge_details, knowledge_status = _build_knowledge_context(knowledge_matches)
 
     return GeneratePreviewResponse(
         customer_text=data.customer_text,
@@ -177,6 +186,8 @@ def generate_preview(data: GeneratePreviewRequest):
         quality_rules=quality_rules,
         knowledge_articles=knowledge_titles,
         knowledge_facts=knowledge_facts[:2],
+        knowledge_matches=knowledge_details,
+        knowledge_status=knowledge_status,
         draft_reply=_build_draft_reply(
             analysis,
             style.profile if style else None,
@@ -204,12 +215,7 @@ def generate_final(data: GenerateFinalRequest):
         topic=analysis.topic,
         limit=2,
     )
-    knowledge_titles = [match.title for match in knowledge_matches]
-    knowledge_facts: list[str] = []
-    for match in knowledge_matches:
-        for fact in match.facts:
-            if fact and fact not in knowledge_facts:
-                knowledge_facts.append(fact)
+    knowledge_titles, knowledge_facts, knowledge_details, knowledge_status = _build_knowledge_context(knowledge_matches)
 
     style_prompt = style_manager.build_style_prompt(style)
     quality_rules = learning_manager.build_quality_rules(style.profile if style else None)
@@ -236,6 +242,8 @@ def generate_final(data: GenerateFinalRequest):
         reply_style_label=analysis.reply_style_label,
         knowledge_articles=knowledge_titles,
         knowledge_facts=knowledge_facts[:2],
+        knowledge_matches=knowledge_details,
+        knowledge_status=knowledge_status,
     )
 
 
@@ -248,6 +256,42 @@ def _resolve_style(style_name: str | None):
         if style.name.strip().lower() == normalized:
             return style
     return default_style
+
+
+def _build_knowledge_context(knowledge_matches) -> tuple[list[str], list[str], list[KnowledgeMatchResponse], str]:
+    knowledge_titles = [match.title for match in knowledge_matches]
+    knowledge_facts: list[str] = []
+    knowledge_details: list[KnowledgeMatchResponse] = []
+
+    for match in knowledge_matches:
+        match_facts: list[str] = []
+        for fact in match.facts:
+            if not fact:
+                continue
+            match_facts.append(fact)
+            if fact not in knowledge_facts:
+                knowledge_facts.append(fact)
+
+        knowledge_details.append(
+            KnowledgeMatchResponse(
+                article_id=match.article_id,
+                title=match.title,
+                product=match.product,
+                score=match.score,
+                summary=match.summary,
+                facts=match_facts[:2],
+                matched_terms=match.matched_terms[:8],
+            )
+        )
+
+    if knowledge_facts:
+        status = "found"
+    elif knowledge_matches:
+        status = "article_without_facts"
+    else:
+        status = "not_found"
+
+    return knowledge_titles, knowledge_facts, knowledge_details, status
 
 
 def _build_draft_reply(

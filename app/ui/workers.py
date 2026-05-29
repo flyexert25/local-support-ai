@@ -164,7 +164,7 @@ class BackendGenerateWorker(QObject):
     def run(self) -> None:
         started_at = perf_counter()
         try:
-            payload = self.backend_client.generate_final(
+            payload = self.backend_client.prepare_answer(
                 customer_text=self.customer_text,
                 ocr_text=self.ocr_text,
                 selected_style=self.selected_style,

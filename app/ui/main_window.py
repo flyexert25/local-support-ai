@@ -1018,7 +1018,7 @@ class MainWindow(QMainWindow):
             self._start_ocr()
             return
         if customer or ocr:
-            self._run_backend_analysis(customer, ocr)
+            self._start_final_generation()
             return
         self._start_final_generation()
 
@@ -1247,6 +1247,9 @@ class MainWindow(QMainWindow):
         self.ocr_text.setPlainText(learned.text)
         self._set_ocr_feedback_enabled(bool(text))
         customer = self.customer_text.toPlainText().strip()
+        if self._autofinalize_after_preview:
+            self._start_final_generation()
+            return
         if customer or learned.text:
             self._run_backend_analysis(customer, learned.text)
         else:
@@ -1259,12 +1262,7 @@ class MainWindow(QMainWindow):
         self._set_expert_debug(message)
         if self._autofinalize_after_preview:
             self._set_status("Не удалось распознать скриншот. Пытаюсь подготовить ответ по доступному контексту.")
-            customer = self.customer_text.toPlainText().strip()
-            ocr = self.ocr_text.toPlainText().strip()
-            if customer or ocr:
-                self._run_backend_analysis(customer, ocr)
-            else:
-                self._start_final_generation()
+            self._start_final_generation()
             return
         self._worker_failed(message)
 

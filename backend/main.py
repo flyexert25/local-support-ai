@@ -82,6 +82,21 @@ class GenerateFinalRequest(BaseModel):
     image_base64: str | None = None
 
 
+class RetrieveKnowledgeRequest(BaseModel):
+    customer_text: str
+    ocr_text: str | None = None
+    topic: str | None = None
+    limit: int = 3
+
+
+class RetrieveKnowledgeResponse(BaseModel):
+    topic: str | None = None
+    knowledge_articles: list[str]
+    knowledge_facts: list[str]
+    knowledge_matches: list[KnowledgeMatchResponse]
+    knowledge_status: str
+
+
 class GenerateFinalResponse(BaseModel):
     response_text: str
     model: str
@@ -124,13 +139,7 @@ def echo(data: EchoRequest):
 
 @app.post("/analyze-request")
 def analyze_request(data: AnalyzeRequest):
-    style = _resolve_style(data.selected_style)
-    analysis = case_analyzer.analyze(
-        data.customer_text,
-        data.ocr_text or "",
-        style_profile=style.profile if style else None,
-        reply_style_label=style.name if style else None,
-    )
+    style, analysis = _build_analysis(data.customer_text, data.ocr_text or "", data.selected_style)
 
     return {
         "customer_text": data.customer_text,
@@ -147,78 +156,94 @@ def analyze_request(data: AnalyzeRequest):
     }
 
 
-@app.post("/generate-preview", response_model=GeneratePreviewResponse)
-def generate_preview(data: GeneratePreviewRequest):
-    style = _resolve_style(data.selected_style)
-    analysis = case_analyzer.analyze(
-        data.customer_text,
-        data.ocr_text or "",
-        style_profile=style.profile if style else None,
-        reply_style_label=style.name if style else None,
-    )
+@app.post("/analyze")
+def analyze(data: AnalyzeRequest):
+    return analyze_request(data)
+
+
+@app.post("/retrieve-knowledge", response_model=RetrieveKnowledgeResponse)
+def retrieve_knowledge(data: RetrieveKnowledgeRequest):
+    topic = data.topic
+    if not topic:
+        _, analysis = _build_analysis(data.customer_text, data.ocr_text or "", None)
+        topic = analysis.topic
+
     knowledge_matches = knowledge_service.search(
         customer_text=data.customer_text,
         ocr_text=data.ocr_text or "",
-        topic=analysis.topic,
-        limit=2,
+        topic=topic,
+        limit=max(1, min(int(data.limit or 3), 8)),
     )
-    quality_rules_raw = learning_manager.build_quality_rules(style.profile if style else None)
-    quality_rules = [
-        line.lstrip("- ").strip()
-        for line in quality_rules_raw.splitlines()
-        if line.strip()
-    ]
     knowledge_titles, knowledge_facts, knowledge_details, knowledge_status = _build_knowledge_context(knowledge_matches)
+    return RetrieveKnowledgeResponse(
+        topic=topic,
+        knowledge_articles=knowledge_titles,
+        knowledge_facts=knowledge_facts[:4],
+        knowledge_matches=knowledge_details,
+        knowledge_status=knowledge_status,
+    )
+
+
+@app.post("/generate-preview", response_model=GeneratePreviewResponse)
+def generate_preview(data: GeneratePreviewRequest):
+    context = _build_backend_context(
+        customer_text=data.customer_text,
+        ocr_text=data.ocr_text or "",
+        selected_style=data.selected_style,
+        knowledge_limit=2,
+    )
 
     return GeneratePreviewResponse(
         customer_text=data.customer_text,
         ocr_text=data.ocr_text,
         selected_style=data.selected_style,
-        style_name=style.name if style else None,
-        tone=str(style.profile.get("tone")) if style else None,
-        topic=analysis.topic,
-        signals=analysis.signals,
-        extracted=analysis.extracted,
-        customer_tone=analysis.customer_tone,
-        escalation_risk=analysis.escalation_risk,
-        priority=analysis.priority,
-        reply_style_label=analysis.reply_style_label,
-        quality_rules=quality_rules,
-        knowledge_articles=knowledge_titles,
-        knowledge_facts=knowledge_facts[:2],
-        knowledge_matches=knowledge_details,
-        knowledge_status=knowledge_status,
+        style_name=context["style"].name if context["style"] else None,
+        tone=str(context["style"].profile.get("tone")) if context["style"] else None,
+        topic=context["analysis"].topic,
+        signals=context["analysis"].signals,
+        extracted=context["analysis"].extracted,
+        customer_tone=context["analysis"].customer_tone,
+        escalation_risk=context["analysis"].escalation_risk,
+        priority=context["analysis"].priority,
+        reply_style_label=context["analysis"].reply_style_label,
+        quality_rules=context["quality_rules"],
+        knowledge_articles=context["knowledge_titles"],
+        knowledge_facts=context["knowledge_facts"][:2],
+        knowledge_matches=context["knowledge_details"],
+        knowledge_status=context["knowledge_status"],
         draft_reply=_build_draft_reply(
-            analysis,
-            style.profile if style else None,
-            knowledge_facts=knowledge_facts[:2],
+            context["analysis"],
+            context["style"].profile if context["style"] else None,
+            knowledge_facts=context["knowledge_facts"][:2],
         ),
     )
 
 
 @app.post("/generate-final", response_model=GenerateFinalResponse)
 def generate_final(data: GenerateFinalRequest):
-    style = _resolve_style(data.selected_style)
+    return _generate_final_response(data)
+
+
+@app.post("/prepare-answer", response_model=GenerateFinalResponse)
+def prepare_answer(data: GenerateFinalRequest):
+    return _generate_final_response(data)
+
+
+def _generate_final_response(data: GenerateFinalRequest) -> GenerateFinalResponse:
     model = (data.model or settings.values.preferred_model or "").strip()
     if not model:
         raise ValueError("Не выбрана локальная модель для генерации.")
 
-    analysis = case_analyzer.analyze(
-        data.customer_text,
-        data.ocr_text or "",
-        style_profile=style.profile if style else None,
-        reply_style_label=style.name if style else None,
-    )
-    knowledge_matches = knowledge_service.search(
+    context = _build_backend_context(
         customer_text=data.customer_text,
         ocr_text=data.ocr_text or "",
-        topic=analysis.topic,
-        limit=2,
+        selected_style=data.selected_style,
+        knowledge_limit=2,
     )
-    knowledge_titles, knowledge_facts, knowledge_details, knowledge_status = _build_knowledge_context(knowledge_matches)
+    style = context["style"]
 
     style_prompt = style_manager.build_style_prompt(style)
-    quality_rules = learning_manager.build_quality_rules(style.profile if style else None)
+    quality_rules = context["quality_rules_raw"]
     reply = ai_manager.generate_reply(
         customer_text=data.customer_text,
         ocr_text=data.ocr_text or "",
@@ -226,25 +251,68 @@ def generate_final(data: GenerateFinalRequest):
         quality_rules=quality_rules,
         model=model,
         image_base64=data.image_base64,
-        topic_hint=analysis.topic,
-        knowledge_facts=knowledge_facts[:2],
+        topic_hint=context["analysis"].topic,
+        knowledge_facts=context["knowledge_facts"][:2],
     )
 
     return GenerateFinalResponse(
         response_text=reply,
         model=model,
-        topic=analysis.topic,
-        signals=analysis.signals,
-        extracted=analysis.extracted,
-        customer_tone=analysis.customer_tone,
-        escalation_risk=analysis.escalation_risk,
-        priority=analysis.priority,
-        reply_style_label=analysis.reply_style_label,
-        knowledge_articles=knowledge_titles,
-        knowledge_facts=knowledge_facts[:2],
-        knowledge_matches=knowledge_details,
-        knowledge_status=knowledge_status,
+        topic=context["analysis"].topic,
+        signals=context["analysis"].signals,
+        extracted=context["analysis"].extracted,
+        customer_tone=context["analysis"].customer_tone,
+        escalation_risk=context["analysis"].escalation_risk,
+        priority=context["analysis"].priority,
+        reply_style_label=context["analysis"].reply_style_label,
+        knowledge_articles=context["knowledge_titles"],
+        knowledge_facts=context["knowledge_facts"][:2],
+        knowledge_matches=context["knowledge_details"],
+        knowledge_status=context["knowledge_status"],
     )
+
+
+def _build_analysis(customer_text: str, ocr_text: str, selected_style: str | None):
+    style = _resolve_style(selected_style)
+    analysis = case_analyzer.analyze(
+        customer_text,
+        ocr_text,
+        style_profile=style.profile if style else None,
+        reply_style_label=style.name if style else None,
+    )
+    return style, analysis
+
+
+def _build_backend_context(
+    customer_text: str,
+    ocr_text: str,
+    selected_style: str | None,
+    knowledge_limit: int,
+) -> dict:
+    style, analysis = _build_analysis(customer_text, ocr_text, selected_style)
+    knowledge_matches = knowledge_service.search(
+        customer_text=customer_text,
+        ocr_text=ocr_text,
+        topic=analysis.topic,
+        limit=knowledge_limit,
+    )
+    knowledge_titles, knowledge_facts, knowledge_details, knowledge_status = _build_knowledge_context(knowledge_matches)
+    quality_rules_raw = learning_manager.build_quality_rules(style.profile if style else None)
+    quality_rules = [
+        line.lstrip("- ").strip()
+        for line in quality_rules_raw.splitlines()
+        if line.strip()
+    ]
+    return {
+        "style": style,
+        "analysis": analysis,
+        "quality_rules_raw": quality_rules_raw,
+        "quality_rules": quality_rules,
+        "knowledge_titles": knowledge_titles,
+        "knowledge_facts": knowledge_facts,
+        "knowledge_details": knowledge_details,
+        "knowledge_status": knowledge_status,
+    }
 
 
 def _resolve_style(style_name: str | None):

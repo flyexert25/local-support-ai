@@ -126,3 +126,38 @@ class BackendClient:
         if not isinstance(data, dict):
             raise BackendUnavailableError("FastAPI backend вернул неожиданный формат ответа.")
         return data
+
+    def prepare_answer(
+        self,
+        customer_text: str,
+        ocr_text: str = "",
+        selected_style: str | None = None,
+        model: str | None = None,
+        image_base64: str | None = None,
+    ) -> dict[str, Any]:
+        if self.settings.values.network_disabled:
+            raise BackendUnavailableError("Сетевой доступ полностью отключён в настройках.")
+
+        payload = {
+            "customer_text": customer_text,
+            "ocr_text": ocr_text or None,
+            "selected_style": selected_style,
+            "model": model,
+            "image_base64": image_base64,
+        }
+        try:
+            response = self.session.post(
+                f"{self.base_url}/prepare-answer",
+                json=payload,
+                timeout=180,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException as exc:
+            raise BackendUnavailableError(f"FastAPI backend недоступен: {exc}") from exc
+        except ValueError as exc:
+            raise BackendUnavailableError("FastAPI backend вернул некорректный JSON.") from exc
+
+        if not isinstance(data, dict):
+            raise BackendUnavailableError("FastAPI backend вернул неожиданный формат ответа.")
+        return data

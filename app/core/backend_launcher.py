@@ -4,6 +4,7 @@ import socket
 import subprocess
 import sys
 import time
+import os
 from pathlib import Path
 
 
@@ -86,6 +87,10 @@ class LocalBackendLauncher:
             str(self.port),
         ]
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        env = os.environ.copy()
+        models_path = Path("D:/OllamaModels")
+        if models_path.exists() and not env.get("OLLAMA_MODELS"):
+            env["OLLAMA_MODELS"] = str(models_path)
         return subprocess.Popen(
             command,
             cwd=str(self.backend_dir),
@@ -93,6 +98,7 @@ class LocalBackendLauncher:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=creationflags,
+            env=env,
         )
 
     def _resolve_python(self) -> Path | None:

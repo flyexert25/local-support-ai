@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QByteArray, QSize, Qt
+from PyQt6.QtCore import QByteArray, QEvent, QSize, Qt
 from PyQt6.QtGui import QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import (
@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -263,7 +264,7 @@ class MainWindow(QMainWindow):
         return column
 
     def _build_message_card(self) -> QFrame:
-        frame = self._create_panel("Сообщение клиента")
+        frame = self._create_panel("Сообщение")
         frame.setProperty("flat_section", True)
         layout = frame.layout()
         layout.setSpacing(12)
@@ -275,8 +276,9 @@ class MainWindow(QMainWindow):
         customer_box_layout.setSpacing(0)
         self.customer_text = QPlainTextEdit()
         self.customer_text.setObjectName("CustomerEditor")
-        self.customer_text.setPlaceholderText("Вставьте сообщение клиента или переписку. Скриншот можно добавить из буфера или выбрать файлом.")
+        self.customer_text.setPlaceholderText("Вставьте сообщение или переписку. Скриншот можно добавить из буфера или выбрать файлом.")
         self.customer_text.setFixedHeight(210)
+        self.customer_text.installEventFilter(self)
         self.customer_text.textChanged.connect(self.update_case_summary)
         self.customer_text.textChanged.connect(self._update_message_counter)
         customer_box_layout.addWidget(self.customer_text)
@@ -288,7 +290,7 @@ class MainWindow(QMainWindow):
         self.screenshot_button.setObjectName("Ghost")
         self.screenshot_button.setMinimumWidth(104)
         self.screenshot_button.setToolTip("Добавить скриншот")
-        self.screenshot_button.clicked.connect(self.open_image_dialog)
+        self.screenshot_button.clicked.connect(self.add_screenshot)
         self.ocr_only_button = QPushButton("OCR со скриншота")
         self.ocr_only_button.setObjectName("Ghost")
         self.ocr_only_button.setMinimumWidth(156)
@@ -485,34 +487,54 @@ class MainWindow(QMainWindow):
         sidebar.setFixedWidth(270)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(14)
+        layout.setSpacing(10)
 
-        ocr_card = self._create_panel("OCR preview")
+        ocr_card = self._create_panel("OCR")
         ocr_layout = ocr_card.layout()
+        self.ocr_preview_toggle = QToolButton()
+        self.ocr_preview_toggle.setObjectName("SectionToggle")
+        self.ocr_preview_toggle.setText("Показать OCR preview")
+        self.ocr_preview_toggle.setCheckable(True)
+        self.ocr_preview_toggle.setChecked(False)
+        self.ocr_preview_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.ocr_preview_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.ocr_preview_toggle.toggled.connect(self._toggle_ocr_preview)
+        ocr_layout.addWidget(self.ocr_preview_toggle)
+
+        self.ocr_preview_body = QWidget()
+        ocr_body_layout = QVBoxLayout(self.ocr_preview_body)
+        ocr_body_layout.setContentsMargins(0, 6, 0, 0)
+        ocr_body_layout.setSpacing(8)
         self.expert_image_label = QLabel("Скриншот не добавлен")
         self.expert_image_label.setObjectName("Hint")
         self.expert_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.expert_image_label.setMinimumHeight(150)
+        self.expert_image_label.setMinimumHeight(92)
+        self.expert_image_label.setMaximumHeight(120)
         self.expert_image_label.setFrameShape(QFrame.Shape.StyledPanel)
         self.expert_image_label.setStyleSheet("border-radius: 8px;")
-        ocr_layout.addWidget(self.expert_image_label)
+        ocr_body_layout.addWidget(self.expert_image_label)
 
         self.ocr_text = QPlainTextEdit()
+        self.ocr_text.setObjectName("OcrPreviewEditor")
         self.ocr_text.setPlaceholderText("Распознанный текст со скриншота появится здесь.")
-        self.ocr_text.setMinimumHeight(120)
+        self.ocr_text.setMinimumHeight(88)
+        self.ocr_text.setMaximumHeight(110)
+        self.ocr_text.installEventFilter(self)
         self.ocr_text.textChanged.connect(self.update_case_summary)
-        ocr_layout.addWidget(self.ocr_text)
+        ocr_body_layout.addWidget(self.ocr_text)
 
         ocr_actions = QHBoxLayout()
         self.ocr_feedback_correct_button = QPushButton("OCR верно")
         self.ocr_feedback_correct_button.setObjectName("Tiny")
         self.ocr_feedback_correct_button.clicked.connect(self.mark_ocr_correct)
-        self.ocr_feedback_save_button = QPushButton("Сохранить исправленный текст")
+        self.ocr_feedback_save_button = QPushButton("Сохранить OCR")
         self.ocr_feedback_save_button.setObjectName("Tiny")
         self.ocr_feedback_save_button.clicked.connect(self.save_corrected_ocr_text)
         ocr_actions.addWidget(self.ocr_feedback_correct_button)
         ocr_actions.addWidget(self.ocr_feedback_save_button)
-        ocr_layout.addLayout(ocr_actions)
+        ocr_body_layout.addLayout(ocr_actions)
+        self.ocr_preview_body.setVisible(False)
+        ocr_layout.addWidget(self.ocr_preview_body)
         layout.addWidget(ocr_card)
         self.ocr_card = ocr_card
 
@@ -558,11 +580,27 @@ class MainWindow(QMainWindow):
         self.knowledge_card = knowledge_card
 
         status_card = self._create_panel("Статусы")
+        status_card.setMinimumHeight(184)
         status_layout = status_card.layout()
-        self.backend_status_value = self._status_row(status_layout, "Backend")
-        self.model_status_value = self._status_row(status_layout, "Модель")
-        self.ocr_status_value = self._status_row(status_layout, "OCR")
-        self.expert_sla_label = QLabel("SLA по этапам появится после подготовки ответа.")
+        self.backend_status_dot, self.backend_status_value = self._status_row(
+            status_layout,
+            "Backend",
+            "Локальный FastAPI",
+        )
+        self.model_status_dot, self.model_status_value = self._status_row(
+            status_layout,
+            "Модель",
+            "Ollama",
+        )
+        self.ocr_status_dot, self.ocr_status_value = self._status_row(
+            status_layout,
+            "OCR",
+            "Скриншоты",
+        )
+        self.expert_sla_title = QLabel("Последний запуск")
+        self.expert_sla_title.setObjectName("StatusRowTitle")
+        status_layout.addWidget(self.expert_sla_title)
+        self.expert_sla_label = QLabel("SLA появится после подготовки ответа.")
         self.expert_sla_label.setObjectName("Subtle")
         self.expert_sla_label.setWordWrap(True)
         status_layout.addWidget(self.expert_sla_label)
@@ -582,10 +620,19 @@ class MainWindow(QMainWindow):
         controls_row.addWidget(self.model_combo, 1)
         controls_row.addWidget(self.refresh_button)
         status_layout.addLayout(controls_row)
-        layout.addWidget(status_card)
+        layout.insertWidget(1, status_card)
         self.statuses_card = status_card
         self.detail_card = None
-        return sidebar
+
+        scroll = QScrollArea()
+        scroll.setObjectName("ExpertSidebarScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(sidebar)
+        scroll.setFixedWidth(286)
+        return scroll
 
     def _build_footer(self) -> QWidget:
         footer = QWidget()
@@ -692,20 +739,30 @@ class MainWindow(QMainWindow):
         return row
 
     @staticmethod
-    def _status_row(layout: QVBoxLayout, title: str) -> QLabel:
+    def _status_row(layout: QVBoxLayout, title: str, caption: str) -> tuple[QLabel, QLabel]:
         row = QWidget()
+        row.setObjectName("StatusRow")
+        row.setToolTip(caption)
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(8)
+        row_layout.setSpacing(10)
+        dot = QLabel("●")
+        dot.setObjectName("StatusDot")
+        dot.setProperty("state", "neutral")
+        dot.setFixedWidth(12)
         left = QLabel(title)
-        left.setObjectName("Subtle")
+        left.setObjectName("StatusRowTitle")
+
         right = QLabel("—")
         right.setObjectName("InsightMetaValue")
-        row_layout.addWidget(left)
+        right.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        right.setWordWrap(True)
+        row_layout.addWidget(dot, 0, Qt.AlignmentFlag.AlignTop)
+        row_layout.addWidget(left, 1)
         row_layout.addStretch(1)
-        row_layout.addWidget(right)
+        row_layout.addWidget(right, 1)
         layout.addWidget(row)
-        return right
+        return dot, right
 
     def _bind_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self.open_image_dialog)
@@ -755,7 +812,7 @@ class MainWindow(QMainWindow):
 
     def _update_sla_message(self) -> None:
         if not any(self.stage_metrics.values()):
-            self.expert_sla_label.setText("SLA по этапам появится после подготовки ответа.")
+            self.expert_sla_label.setText("SLA появится после подготовки ответа.")
             return
         parts = [
             f"OCR {self._format_duration(self.stage_metrics['ocr_ms'])}",
@@ -773,17 +830,20 @@ class MainWindow(QMainWindow):
         ocr_ready = True
         if self.settings.values.processing_mode == "text_only":
             self.ocr_status_value.setText("Скрыт")
+            self._set_status_dot(self.ocr_status_dot, "neutral")
         elif self.settings.values.use_ocr:
             ocr_status = self.ocr_manager.status()
             ocr_ready = ocr_status.ready
             self.ocr_status_value.setText("Готов" if ocr_status.ready else "Не готов")
+            self._set_status_dot(self.ocr_status_dot, "ok" if ocr_status.ready else "warning")
         else:
             self.ocr_status_value.setText("Выключен")
+            self._set_status_dot(self.ocr_status_dot, "warning")
 
         status = self.ai_manager.check_status()
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
-        models = status.supported_models or status.installed_models
+        models = status.installed_models or status.supported_models
         self.model_combo.addItems(models)
         preferred = self.settings.values.preferred_model
         if preferred and preferred in models:
@@ -793,10 +853,12 @@ class MainWindow(QMainWindow):
             self.settings.update(preferred_model=models[0])
         self.model_combo.blockSignals(False)
 
-        model_ready = bool(status.supported_models)
+        model_ready = bool(models)
         self.ready_status.set_state("Ready", model_ready and ocr_ready)
-        self.backend_status_value.setText("Local FastAPI")
+        self.backend_status_value.setText("FastAPI готов" if not self.settings.values.network_disabled else "Строгий offline")
+        self._set_status_dot(self.backend_status_dot, "ok" if not self.settings.values.network_disabled else "warning")
         self.model_status_value.setText(self.model_combo.currentText() or "Не найдена")
+        self._set_status_dot(self.model_status_dot, "ok" if model_ready else "warning")
         self.runtime_note_label.setText(
             f"Локальная модель: {self.model_combo.currentText() or 'не выбрана'}"
         )
@@ -810,7 +872,7 @@ class MainWindow(QMainWindow):
     def apply_processing_mode(self) -> None:
         text_only = self.settings.values.processing_mode == "text_only"
         self.screenshot_button.setEnabled(not text_only)
-        has_image = bool(self.current_image_path)
+        has_image = self._has_attached_image()
         self.remove_screenshot_button.setEnabled(not text_only and has_image)
         self.remove_screenshot_button.setVisible(not text_only and has_image)
         self.ocr_card.setVisible(self.settings.values.expert_mode and not text_only)
@@ -866,17 +928,32 @@ class MainWindow(QMainWindow):
             self.settings.update(expert_mode=enabled)
         self.expert_debug_label.setVisible(enabled and bool(self.expert_debug_label.text().strip()))
 
+    def _toggle_ocr_preview(self, expanded: bool) -> None:
+        self.ocr_preview_body.setVisible(expanded)
+        self.ocr_preview_toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        self.ocr_preview_toggle.setText("Скрыть OCR preview" if expanded else "Показать OCR preview")
+
+    @staticmethod
+    def _set_status_dot(dot: QLabel, state: str) -> None:
+        dot.setProperty("state", state)
+        dot.style().unpolish(dot)
+        dot.style().polish(dot)
+
     def _update_message_counter(self) -> None:
         count = len(self.customer_text.toPlainText())
         self.message_count_label.setText(f"{count}/4000")
+
+    def _has_attached_image(self) -> bool:
+        return bool(self.current_image_path or self.current_clipboard_image_base64)
 
     def _update_attachment_label(self) -> None:
         if self.settings.values.processing_mode == "text_only":
             self.attachment_label.setText("Режим только текста")
             self.remove_screenshot_button.setVisible(False)
             return
-        if self.current_image_path:
-            self.attachment_label.setText(f"Скриншот: {self.current_image_path.name}")
+        if self._has_attached_image():
+            name = self.current_image_path.name if self.current_image_path else "из буфера обмена"
+            self.attachment_label.setText(f"Скриншот: {name}")
             self.remove_screenshot_button.setVisible(True)
         else:
             self.attachment_label.setText("Скриншот не добавлен")
@@ -886,8 +963,11 @@ class MainWindow(QMainWindow):
         if self.settings.values.processing_mode == "text_only":
             QMessageBox.information(self, "Режим только текста", "OCR со скриншота недоступен в режиме только текста.")
             return
-        if not self.current_image_path:
+        if not self._has_attached_image() and not self._load_clipboard_image():
             QMessageBox.information(self, "Нет скриншота", "Сначала добавьте скриншот.")
+            return
+        if not self.current_image_path:
+            QMessageBox.information(self, "Нет скриншота", "Не удалось подготовить скриншот для OCR. Добавьте файл или вставьте изображение ещё раз.")
             return
         if not self.settings.values.use_ocr:
             QMessageBox.information(self, "OCR выключен", "Включите OCR в настройках, чтобы распознавать текст со скриншота.")
@@ -931,22 +1011,46 @@ class MainWindow(QMainWindow):
                 return
         super().dropEvent(event)
 
+    def eventFilter(self, watched, event) -> bool:
+        text_widgets = (
+            getattr(self, "customer_text", None),
+            getattr(self, "ocr_text", None),
+        )
+        if watched in text_widgets:
+            if event.type() == QEvent.Type.KeyPress and event.matches(QKeySequence.StandardKey.Paste):
+                if self._load_clipboard_image():
+                    return True
+        return super().eventFilter(watched, event)
+
     def keyPressEvent(self, event) -> None:
         if event.matches(QKeySequence.StandardKey.Paste):
-            clipboard = QApplication.clipboard()
-            mime = clipboard.mimeData()
-            if mime.hasImage():
-                if self.settings.values.processing_mode == "text_only":
-                    self._set_status("Скриншот пропущен: сейчас включён режим только текста.")
-                    return
-                image = clipboard.image()
-                self.current_clipboard_image_base64 = qimage_to_base64(image)
-                temp_path = self.settings.data_dir / "clipboard_image.png"
-                temp_path.write_bytes(qimage_to_png_bytes(image))
-                self.load_image(temp_path, from_clipboard=True)
-                self._set_status("Скриншот вставлен из буфера обмена.")
+            if self._load_clipboard_image():
                 return
         super().keyPressEvent(event)
+
+    def add_screenshot(self) -> None:
+        if self._load_clipboard_image():
+            return
+        self.open_image_dialog()
+
+    def _load_clipboard_image(self) -> bool:
+        clipboard = QApplication.clipboard()
+        mime = clipboard.mimeData()
+        if not mime.hasImage():
+            return False
+        if self.settings.values.processing_mode == "text_only":
+            self._set_status("Скриншот пропущен: сейчас включён режим только текста.")
+            return True
+        image = clipboard.image()
+        if image.isNull():
+            return False
+        self.current_clipboard_image_base64 = qimage_to_base64(image)
+        self.settings.data_dir.mkdir(parents=True, exist_ok=True)
+        temp_path = self.settings.data_dir / "clipboard_image.png"
+        temp_path.write_bytes(qimage_to_png_bytes(image))
+        self.load_image(temp_path, from_clipboard=True)
+        self._set_status("Скриншот вставлен из буфера обмена.")
+        return True
 
     def open_image_dialog(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
@@ -1002,7 +1106,7 @@ class MainWindow(QMainWindow):
         ocr = self.ocr_text.toPlainText().strip()
         has_image = bool(self.current_image_path or self.current_clipboard_image_base64) and self.settings.values.processing_mode != "text_only"
         if not customer and not ocr and not has_image:
-            QMessageBox.information(self, "Нет контекста", "Добавьте сообщение клиента или скриншот, чтобы подготовить ответ.")
+            QMessageBox.information(self, "Нет контекста", "Добавьте сообщение или скриншот, чтобы подготовить ответ.")
             return
 
         self._autofinalize_after_preview = True
@@ -1423,16 +1527,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         self._set_stage_metric("generate_ms", elapsed_ms)
         self._set_expert_debug(message)
-        self._set_status("FastAPI недоступен для генерации. Перехожу на локальную генерацию.")
-        self._set_busy(False)
-        self._start_local_generation_fallback(
-            customer_text,
-            ocr_text,
-            model,
-            style_id,
-            style_profile,
-            image_base64,
-        )
+        self._worker_failed(message)
 
     def _worker_failed(self, message: str) -> None:
         self._autofinalize_after_preview = False
@@ -1447,7 +1542,7 @@ class MainWindow(QMainWindow):
         self.primary_action_button.setEnabled(not busy and self._has_context())
         self.clear_button.setEnabled(not busy)
         self.screenshot_button.setEnabled(not busy and self.settings.values.processing_mode != "text_only")
-        self.remove_screenshot_button.setEnabled(not busy and bool(self.current_image_path))
+        self.remove_screenshot_button.setEnabled(not busy and self._has_attached_image())
         self.theme_button.setEnabled(not busy)
         self.expert_toggle.setEnabled(not busy)
         self.refresh_button.setEnabled(not busy)
@@ -1850,7 +1945,7 @@ class MainWindow(QMainWindow):
         self.primary_action_button.setToolTip(
             "Собрать тему, локальные факты и сразу подготовить итоговый ответ."
         )
-        self.remove_screenshot_button.setEnabled(not self._busy and bool(self.current_image_path))
+        self.remove_screenshot_button.setEnabled(not self._busy and self._has_attached_image())
 
     def _has_context(self) -> bool:
         has_text = bool(self.customer_text.toPlainText().strip() or self.ocr_text.toPlainText().strip())

@@ -20,6 +20,13 @@ QWidget#TopBar {
     background: #0B1020;
     border-bottom: 1px solid rgba(255,255,255,0.08);
 }
+QScrollArea#ExpertSidebarScroll {
+    background: transparent;
+    border: none;
+}
+QScrollArea#ExpertSidebarScroll > QWidget > QWidget {
+    background: transparent;
+}
 QLabel#Title {
     font-size: 17px;
     font-weight: 700;
@@ -144,6 +151,27 @@ QLabel#InsightMetaValue[semantic="warning"] {
 }
 QLabel#InsightMetaValue[semantic="accent"] {
     color: #B6AEFF;
+}
+QLabel#StatusDot {
+    color: #6B7280;
+    font-size: 16px;
+    font-weight: 700;
+}
+QLabel#StatusDot[state="ok"] {
+    color: #34D399;
+}
+QLabel#StatusDot[state="warning"] {
+    color: #FBBF24;
+}
+QLabel#StatusDot[state="error"] {
+    color: #F87171;
+}
+QLabel#StatusRowTitle {
+    color: #F3F4F6;
+    font-weight: 700;
+}
+QWidget#StatusRow {
+    padding: 2px 0px;
 }
 QTextEdit#ExpertContext {
     background: #10151D;
@@ -312,6 +340,10 @@ QPlainTextEdit#ResponseEditor {
     border-radius: 12px;
     padding: 10px;
 }
+QPlainTextEdit#OcrPreviewEditor {
+    font-size: 12px;
+    color: #D1D5DB;
+}
 QComboBox::drop-down {
     border: none;
     width: 24px;
@@ -377,6 +409,13 @@ QWidget#AppShell {
 QWidget#TopBar {
     background: #FFFFFF;
     border-bottom: 1px solid #E5E7EB;
+}
+QScrollArea#ExpertSidebarScroll {
+    background: transparent;
+    border: none;
+}
+QScrollArea#ExpertSidebarScroll > QWidget > QWidget {
+    background: transparent;
 }
 QLabel#Title {
     font-size: 17px;
@@ -508,6 +547,27 @@ QLabel#InsightMetaValue[semantic="warning"] {
 }
 QLabel#InsightMetaValue[semantic="accent"] {
     color: #5A4CF2;
+}
+QLabel#StatusDot {
+    color: #94A3B8;
+    font-size: 16px;
+    font-weight: 700;
+}
+QLabel#StatusDot[state="ok"] {
+    color: #16A34A;
+}
+QLabel#StatusDot[state="warning"] {
+    color: #D97706;
+}
+QLabel#StatusDot[state="error"] {
+    color: #DC2626;
+}
+QLabel#StatusRowTitle {
+    color: #111827;
+    font-weight: 700;
+}
+QWidget#StatusRow {
+    padding: 2px 0px;
 }
 QTextEdit#ExpertContext {
     background: #FFFFFF;
@@ -682,6 +742,10 @@ QPlainTextEdit#ResponseEditor {
     border: none;
     border-radius: 12px;
     padding: 10px;
+}
+QPlainTextEdit#OcrPreviewEditor {
+    font-size: 12px;
+    color: #4B5563;
 }
 QComboBox::drop-down {
     border: none;

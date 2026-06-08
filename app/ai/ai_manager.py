@@ -11,7 +11,7 @@ import requests
 from app.core.settings_manager import SettingsManager
 
 
-SUPPORTED_VISION_MODELS = ("qwen2.5vl", "llava", "minicpm-v")
+SUPPORTED_VISION_MODELS = ("qwen2.5vl", "llava", "minicpm-v", "gemma3")
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
@@ -94,6 +94,7 @@ class AIManager:
             raise LocalNetworkError("Сетевой доступ полностью отключен. Ollama localhost недоступен.")
         if not model:
             raise ValueError("Не выбрана локальная модель Ollama.")
+        model, use_image = self.resolve_generation_model(model, image_base64, ocr_text)
         prompt = self._build_prompt(
             customer_text,
             ocr_text,
@@ -102,7 +103,6 @@ class AIManager:
             topic_hint=topic_hint,
             knowledge_facts=knowledge_facts or [],
         )
-        use_image = self._should_attach_image(image_base64, ocr_text)
         num_predict = self._estimate_num_predict(customer_text, ocr_text, use_image)
         payload: dict[str, Any] = {
             "model": model,
@@ -121,7 +121,11 @@ class AIManager:
         if use_image and image_base64:
             payload["images"] = [image_base64]
         response = self.session.post(f"{self.base_url}/api/generate", json=payload, timeout=180)
-        response.raise_for_status()
+        if response.status_code >= 400 and device == "gpu":
+            retry_payload = {**payload, "options": {**payload["options"]}}
+            retry_payload["options"].pop("num_gpu", None)
+            response = self.session.post(f"{self.base_url}/api/generate", json=retry_payload, timeout=180)
+        self._raise_for_generation_error(response)
         data = response.json()
         text = str(data.get("response", "")).strip()
         if not text:
@@ -129,9 +133,50 @@ class AIManager:
         return self._cleanup_reply(text)
 
     @staticmethod
+    def _raise_for_generation_error(response: requests.Response) -> None:
+        if response.status_code < 400:
+            return
+        message = ""
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                message = str(payload.get("error") or "").strip()
+        except ValueError:
+            message = response.text.strip()
+        if message:
+            raise RuntimeError(f"Ollama вернула ошибку {response.status_code}: {message}")
+        response.raise_for_status()
+
+    @staticmethod
     def is_supported_vision_model(model_name: str) -> bool:
         normalized = model_name.split(":")[0].lower()
         return any(normalized.startswith(prefix) for prefix in SUPPORTED_VISION_MODELS)
+
+    def resolve_generation_model(
+        self,
+        requested_model: str,
+        image_base64: str | None,
+        ocr_text: str,
+    ) -> tuple[str, bool]:
+        use_image = self._should_attach_image(image_base64, ocr_text)
+        if use_image or not self.is_supported_vision_model(requested_model):
+            return requested_model, use_image
+
+        text_model = self._find_text_model(exclude=requested_model)
+        if text_model:
+            return text_model, False
+        return requested_model, False
+
+    def _find_text_model(self, exclude: str = "") -> str | None:
+        status = self.check_status()
+        excluded = exclude.strip().lower()
+        for model in status.installed_models:
+            normalized = model.strip().lower()
+            if normalized == excluded:
+                continue
+            if not self.is_supported_vision_model(model):
+                return model
+        return None
 
     @staticmethod
     def _cleanup_reply(text: str) -> str:
@@ -141,6 +186,7 @@ class AIManager:
             if cleaned.lower().startswith(prefix.lower()):
                 cleaned = cleaned[len(prefix) :].strip()
         cleaned = AIManager._sanitize_reply(cleaned)
+        cleaned = AIManager._soften_reply_language(cleaned)
         return cleaned
 
     @staticmethod
@@ -159,6 +205,30 @@ class AIManager:
             if not cleaned:
                 cleaned = "Понял вас. Давайте решим вопрос спокойно и по сути."
         return cleaned
+
+    @staticmethod
+    def _soften_reply_language(text: str) -> str:
+        cleaned = text.strip()
+        replacements = {
+            "По правилам продукта:": "",
+            "По правилам сервиса:": "",
+            "Согласно правилам продукта,": "",
+            "Согласно правилам сервиса,": "",
+            "Проверю правила": "Проверю детали",
+            "Проверю условия": "Проверю детали",
+            "Сверю условия": "Сверю детали",
+            "скорее всего, условия не были выполнены": "проверим, были ли выполнены условия",
+            "скорее всего условия не были выполнены": "проверим, были ли выполнены условия",
+        }
+        for old, new in replacements.items():
+            cleaned = re.sub(re.escape(old), new, cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        cleaned = re.sub(
+            r"(^|[.!?]\s+)([а-яё])",
+            lambda match: match.group(1) + match.group(2).upper(),
+            cleaned,
+        )
+        return cleaned.strip()
 
     @staticmethod
     def _build_prompt(
@@ -180,7 +250,11 @@ class AIManager:
         return (
             "Ты пишешь ответ клиенту от лица живого сотрудника поддержки.\n"
             "Пиши спокойно, по-человечески и по сути. Не упоминай ИИ, шаблоны или внутренние правила.\n"
-            "Если данных мало, не выдумывай детали и не обещай то, чего нет в сообщении.\n\n"
+            "Ответ должен звучать как готовое сообщение клиенту, а не как план проверки или пересказ инструкции.\n"
+            "Не пиши фразы вроде «по правилам продукта», «согласно правилам», «по условиям продукта», если это не естественная часть ответа.\n"
+            "Если данных мало, не выдумывай детали и не обещай то, чего нет в сообщении. Лучше коротко скажи, что проверите детали и вернетесь с ответом.\n\n"
+            "Не пиши, что клиент нарушил условия, не внес платеж или не погасил долг, если это прямо не видно из сообщения или OCR.\n"
+            "В спорных начислениях формулируй нейтрально: проверим даты, платежи и состав задолженности, после этого поясним причину.\n\n"
             f"{style_prompt}\n\n"
             "Уточнения по качеству ответа:\n"
             f"{rules_block}\n\n"
@@ -239,19 +313,22 @@ class AIManager:
             return (
                 "Локальная база знаний:\n"
                 "- Релевантные факты не найдены.\n"
-                "- Не придумывай продуктовые условия, тарифы, сроки, комиссии или правила.\n"
-                "- Если данных недостаточно, ответь осторожно и предложи проверить условия по продукту.\n\n"
+                "- Не придумывай продуктовые условия, тарифы, сроки или комиссии.\n"
+                "- Не проговаривай клиенту, что факты не найдены. Сформулируй обычный человеческий ответ без внутренних пояснений.\n\n"
             )
 
-        lines = ["Локальная проверка контекста:"]
+        lines = ["Локальная база знаний для внутренней опоры. Это не готовый ответ клиенту:"]
         if topic_hint:
             lines.append(f"- Проверенная тема: {topic_hint}")
         if clean_facts:
-            lines.append("- Используй только найденные факты ниже для продуктовых условий.")
+            lines.append("- Используй факты как контекст, но не копируй их дословно в ответ.")
+            lines.append("- Не делай вывод, что условие выполнено в конкретном кейсе, если этого нет в сообщении клиента или OCR.")
+            lines.append("- Если факт описывает условие, сформулируй ответ как проверку нужных деталей, а не как уверенное утверждение.")
             for fact in clean_facts:
                 lines.append(f"- Факт: {fact}")
         else:
             lines.append("- Релевантные факты по теме не найдены.")
-            lines.append("- Не придумывай продуктовые условия; сформулируй ответ как проверку ситуации.")
+            lines.append("- Не придумывай продуктовые условия; сформулируй ответ как спокойную проверку ситуации.")
+        lines.append("- Итоговый ответ должен быть полноценным сообщением клиенту: приветствие, суть, что проверим/поясним, без внутренней терминологии.")
         lines.append("")
         return "\n".join(lines)
